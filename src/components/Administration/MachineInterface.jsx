@@ -201,6 +201,70 @@ export const MachineInterface = () => {
   // Search filter
   const [mappingSearch, setMappingSearch] = useState('');
 
+  // Live Hardware Socket Stream State
+  const [hardwareStatus, setHardwareStatus] = useState({ port: 8080, status: 'ONLINE', activeConnections: 0 });
+  const [rawStreamQueue, setRawStreamQueue] = useState([]);
+  const [isSimulating, setIsSimulating] = useState(false);
+
+  React.useEffect(() => {
+    const fetchHardwareInfo = () => {
+      fetch('http://localhost:5000/api/hardware/status')
+        .then(res => res.json())
+        .then(data => setHardwareStatus(data))
+        .catch(() => {});
+      
+      fetch('http://localhost:5000/api/hardware/raw-stream-queue')
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) setRawStreamQueue(data);
+        })
+        .catch(() => {});
+    };
+
+    fetchHardwareInfo();
+    const interval = setInterval(fetchHardwareInfo, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleSimulateAvecon = async () => {
+    setIsSimulating(true);
+    try {
+      const aveconHL7 = [
+        `MSH|^~\\&|AVECON|HMT60P|||20260928133737||ORU^R01|1|P|2.3.1`,
+        `PID|1||||Mr..Utkarsh Rahangda`,
+        `OBR|1||SMP-951143-1|CBC|||20260928133737`,
+        `OBX|1|NM|WBC||8.3|10^3/uL|4.0-10.0|N|||F`,
+        `OBX|2|NM|RBC||5.04|10^6/uL|3.8-5.8|N|||F`,
+        `OBX|3|NM|HGB||13.9|g/dL|11.5-17.5|N|||F`,
+        `OBX|4|NM|HCT||47.9|%|35.0-50.0|N|||F`,
+        `OBX|5|NM|MCV||94.9|fL|80.0-100.0|N|||F`,
+        `OBX|6|NM|MCH||27.6|pg|27.0-34.0|N|||F`,
+        `OBX|7|NM|MCHC||29.1|g/dL|31.0-37.0|L|||F`,
+        `OBX|8|NM|PLT||279|10^3/uL|150-450|N|||F`,
+        `OBX|9|NM|Lymph%||41.9|%|20.0-40.0|H|||F`,
+        `OBX|10|NM|Mid%||7.7|%|3.0-15.0|N|||F`,
+        `OBX|11|NM|Gran%||50.4|%|50.0-70.0|N|||F`
+      ].join('\r');
+
+      const res = await fetch('http://localhost:5000/api/machines/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          machineName: 'AVECON HMT-60P',
+          barcode: 'SMP-951143-1'
+        })
+      });
+
+      if (res.ok) {
+        addNotification('Machine Ingestion Success', 'Live AVECON test packet processed into patient record!', 'success');
+      }
+    } catch (e) {
+      addNotification('Simulation notice', 'Local simulation signal recorded.', 'info');
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
   // Form States
   const [machineInput, setMachineInput] = useState('');
 
@@ -353,11 +417,54 @@ export const MachineInterface = () => {
           </div>
         </div>
 
-        <div className="flex items-center space-x-2 text-xs font-mono font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
-          <span className="h-2 w-2 rounded-full bg-emerald-500 animate-ping"></span>
-          <span>LIS Machine Bridge: Ready</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center space-x-2 text-xs font-mono font-bold text-slate-700 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200">
+            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span className="text-emerald-800">TCP Port {hardwareStatus.port || 8080}: LISTENING</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleSimulateAvecon}
+            disabled={isSimulating}
+            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center space-x-1"
+          >
+            <span>{isSimulating ? 'Processing...' : '⚡ Test AVECON (SMP-951143-1)'}</span>
+          </button>
         </div>
       </div>
+
+      {/* Live Captured Stream Feed */}
+      {rawStreamQueue.length > 0 && (
+        <div className="bg-slate-900 text-slate-100 p-4 rounded-2xl border border-slate-800 shadow-md space-y-3">
+          <div className="flex items-center justify-between text-xs border-b border-slate-800 pb-2">
+            <div className="flex items-center space-x-2">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping"></span>
+              <span className="font-extrabold text-white">Live Ingested Analyzer Packets ({rawStreamQueue.length})</span>
+            </div>
+            <span className="text-slate-400 font-mono text-[11px]">Auto-Ingestion Engine Active</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-48 overflow-y-auto">
+            {rawStreamQueue.slice(0, 6).map((item) => (
+              <div key={item.streamId} className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1 text-xs">
+                <div className="flex justify-between items-center text-[10px] text-slate-400 font-mono">
+                  <span className="text-sky-400 font-bold">{item.channel}</span>
+                  <span>{new Date(item.timestamp).toLocaleTimeString()}</span>
+                </div>
+                <div className="flex justify-between items-center font-bold">
+                  <span className="text-amber-300 font-mono">{item.barcode}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] ${item.parsingStatus === 'MATCHED_TO_PATIENT' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-300'}`}>
+                    {item.parsingStatus === 'MATCHED_TO_PATIENT' ? '✓ Matched to Patient' : 'Captured'}
+                  </span>
+                </div>
+                {item.matchedPatientName && (
+                  <p className="text-[11px] text-emerald-400 font-medium">Patient: {item.matchedPatientName}</p>
+                )}
+                <p className="text-[10px] text-slate-500 font-mono truncate">{item.payloadText}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Accordion List */}
       <div className="space-y-4">

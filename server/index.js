@@ -1,4 +1,5 @@
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { getDb, saveDb } = require('./db.js');
@@ -569,6 +570,61 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // 6.2 HARDWARE RAW BUFFER QUEUE
+    if (pathname === '/api/hardware/raw-stream-queue' && req.method === 'GET') {
+      const db = getDb();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(db.universal_raw_buffer_queue || []));
+      return;
+    }
+
+    // 6.3 HARDWARE STATUS
+    if (pathname === '/api/hardware/status' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(tcpServerStatus));
+      return;
+    }
+
+    // 6.4 MANUAL COMMIT MAPPED RESULTS
+    if (pathname === '/api/hardware/commit-mapped-results' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const { barcode, patientId, testParameters, streamId } = body;
+      const db = getDb();
+      
+      const paramMap = {};
+      (testParameters || []).forEach(p => {
+        if (p.name && p.value !== undefined) {
+          paramMap[p.name] = parseFloat(p.value) || p.value;
+        }
+      });
+
+      let matchedPatient = null;
+      if (Array.isArray(db.patients)) {
+        matchedPatient = db.patients.find(p => p.id === patientId || p.barcode === barcode);
+        if (matchedPatient) {
+          matchedPatient.status = 'Results Entered';
+          matchedPatient.results = { ...(matchedPatient.results || {}), ...paramMap };
+          if (Array.isArray(matchedPatient.tests)) {
+            matchedPatient.tests = matchedPatient.tests.map(t => ({
+              ...t,
+              status: 'Results Entered',
+              results: { ...(t.results || {}), ...paramMap }
+            }));
+          }
+        }
+      }
+
+      if (db.universal_raw_buffer_queue && streamId) {
+        const stream = db.universal_raw_buffer_queue.find(s => s.streamId === streamId);
+        if (stream) stream.parsingStatus = 'COMMITTED';
+      }
+
+      saveDb(db);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'Results committed to patient record.', patient: matchedPatient }));
+      return;
+    }
+
     // 7. INVENTORY
     if (pathname === '/api/inventory' && req.method === 'GET') {
       const db = getDb();
@@ -641,10 +697,260 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ========================================================
+// 🔌 ACTIVE BACKGROUND HARDWARE TCP SERVER (PORT 8080 & 5100)
+// ========================================================
+const TCP_PORT = process.env.TCP_PORT || 8080;
+let tcpServerStatus = {
+  port: TCP_PORT,
+  status: 'ONLINE',
+  activeConnections: 0,
+  lastPacketReceivedAt: null,
+  totalPacketsIngested: 0
+};
+
+const PARAM_ALIASES = {
+  'HGB': ['HAEMOGLOBIN', 'HGB', 'HB', 'Haemoglobin'],
+  'HB': ['HAEMOGLOBIN', 'HGB', 'HB', 'Haemoglobin'],
+  'WBC': ['W.B.C.Count', 'W.B.C. Count', 'Total WBC Count', 'WBC', 'TLC'],
+  'RBC': ['R.B.C.Count', 'R.B.C. Count', 'RBC Count', 'RBC'],
+  'PLT': ['PLATELET COUNT', 'Platelet Count', 'PLT'],
+  'HCT': ['P.C.V.', 'PCV', 'Packed Cell Volume', 'HCT'],
+  'PCV': ['P.C.V.', 'PCV', 'Packed Cell Volume', 'HCT'],
+  'MCV': ['M.C.V.', 'MCV', 'Mean Corpuscular Volume'],
+  'MCH': ['M.C.H.', 'MCH', 'Mean Corpuscular HGB'],
+  'MCHC': ['M.C.H.C.', 'MCHC', 'Mean Corpuscular HGB Conc'],
+  'RDW-CV': ['RDW (CV)', 'RDW-CV', 'RDW'],
+  'RDW-SD': ['RDW-SD'],
+  'MPV': ['M.P.V*', 'MPV', 'Mean Platelet Volume'],
+  'LYMPH%': ['Lymphocytes', 'LYMPH%', 'LY%'],
+  'LY%': ['Lymphocytes', 'LYMPH%', 'LY%'],
+  'MID%': ['Monocytes', 'MID%', 'MO%'],
+  'MO%': ['Monocytes', 'MID%', 'MO%'],
+  'GRAN%': ['Neutrophils', 'Granulocytes', 'GRAN%', 'GR%'],
+  'GR%': ['Neutrophils', 'Granulocytes', 'GRAN%', 'GR%'],
+  'GLU': ['Glucose (Random)', 'Blood Sugar - Fasting', 'GLU', 'GLUC'],
+  'GLUC': ['Glucose (Random)', 'Blood Sugar - Fasting', 'GLU', 'GLUC']
+};
+
+function parseRawAnalyzerPacket(rawText) {
+  if (!rawText) return null;
+  const clean = rawText.replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, '');
+  const lines = clean.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+  
+  let barcode = null;
+  let patientName = null;
+  const parameters = {};
+
+  const isHL7 = lines.some(l => l.startsWith('MSH'));
+  
+  if (isHL7) {
+    for (const line of lines) {
+      const parts = line.split('|');
+      const seg = parts[0];
+      if (seg === 'PID') {
+        patientName = parts[5] ? parts[5].replace(/\^/g, ' ').trim() : null;
+      } else if (seg === 'OBR') {
+        barcode = (parts[2] || parts[3] || '').trim();
+        if (barcode && barcode.includes('^')) barcode = barcode.split('^')[0].trim();
+      } else if (seg === 'OBX') {
+        const rawCode = (parts[3] || '').replace(/\^/g, ' ').trim().split(' ')[0];
+        const val = parseFloat(parts[5]);
+        const unit = (parts[6] || '').trim();
+        if (rawCode && !isNaN(val)) {
+          parameters[rawCode] = { value: val, unit };
+        }
+      }
+    }
+  } else {
+    for (const line of lines) {
+      const parts = line.split('|');
+      const seg = parts[0];
+      if (seg === 'P') {
+        patientName = parts[5] ? parts[5].replace(/\^/g, ' ').trim() : null;
+      } else if (seg === 'O') {
+        barcode = (parts[2] || parts[3] || '').trim();
+        if (barcode && barcode.includes('^')) barcode = barcode.split('^')[0].trim();
+      } else if (seg === 'R') {
+        const rawCode = (parts[2] || '').replace(/\^/g, ' ').trim().split(' ')[0];
+        const val = parseFloat(parts[3]);
+        const unit = (parts[4] || '').trim();
+        if (rawCode && !isNaN(val)) {
+          parameters[rawCode] = { value: val, unit };
+        }
+      }
+    }
+  }
+
+  return { isHL7, barcode, patientName, parameters };
+}
+
+function ingestAnalyzerResults(parsed, rawText, remoteChannel) {
+  if (!parsed || Object.keys(parsed.parameters).length === 0) return null;
+  
+  const db = getDb();
+  if (!db.universal_raw_buffer_queue) db.universal_raw_buffer_queue = [];
+  if (!db.machine_ingest_queue) db.machine_ingest_queue = [];
+
+  const rawEntry = {
+    streamId: `RAW-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    timestamp: new Date().toISOString(),
+    channel: remoteChannel,
+    barcode: parsed.barcode || 'UNKNOWN',
+    patientName: parsed.patientName || 'UNKNOWN',
+    parameterCount: Object.keys(parsed.parameters).length,
+    payloadText: rawText.substring(0, 1000),
+    parsingStatus: 'PARSED'
+  };
+
+  db.universal_raw_buffer_queue.unshift(rawEntry);
+  if (db.universal_raw_buffer_queue.length > 100) db.universal_raw_buffer_queue.pop();
+
+  // Flexible barcode and patient lookup
+  const targetBarcode = (parsed.barcode || '').toLowerCase().trim();
+  const normTarget = targetBarcode.replace(/[^a-z0-9]/g, '');
+  let matchedPatient = null;
+
+  if (targetBarcode && Array.isArray(db.patients)) {
+    matchedPatient = db.patients.find(p => {
+      const pBarcode = (p.barcode || '').toLowerCase().trim();
+      const pLabCode = (p.labCode || '').toLowerCase().trim();
+      const pUhid = (p.uhid || '').toLowerCase().trim();
+      const normBarcode = pBarcode.replace(/[^a-z0-9]/g, '');
+      const normLab = pLabCode.replace(/[^a-z0-9]/g, '');
+      return (
+        pBarcode === targetBarcode ||
+        normBarcode === normTarget ||
+        (normTarget && normBarcode && (normTarget.includes(normBarcode) || normBarcode.includes(normTarget))) ||
+        pLabCode === targetBarcode ||
+        normLab === normTarget ||
+        pUhid === targetBarcode ||
+        (parsed.patientName && p.name && p.name.toLowerCase().includes(parsed.patientName.toLowerCase().split(' ')[0]))
+      );
+    });
+  }
+
+  // Populate both direct codes and canonical aliases
+  const resultMap = {};
+  for (const [k, v] of Object.entries(parsed.parameters)) {
+    let finalVal = v.value;
+    if ((k.toUpperCase() === 'WBC' || k.toUpperCase() === 'PLT') && finalVal < 1000) {
+      finalVal = Math.round(finalVal * 1000);
+    }
+    resultMap[k] = finalVal;
+    
+    const aliases = PARAM_ALIASES[k.toUpperCase()] || [];
+    for (const alias of aliases) {
+      resultMap[alias] = finalVal;
+    }
+  }
+
+  if (matchedPatient) {
+    matchedPatient.status = 'Results Entered';
+    matchedPatient.results = { ...(matchedPatient.results || {}), ...resultMap };
+    
+    if (Array.isArray(matchedPatient.tests)) {
+      matchedPatient.tests = matchedPatient.tests.map(t => ({
+        ...t,
+        status: 'Results Entered',
+        results: { ...(t.results || {}), ...resultMap }
+      }));
+    }
+
+    rawEntry.matchedPatientId = matchedPatient.id;
+    rawEntry.matchedPatientName = matchedPatient.name;
+    rawEntry.parsingStatus = 'MATCHED_TO_PATIENT';
+    console.log(`[LIMS INGEST] Automatically matched and updated patient ${matchedPatient.name} (${matchedPatient.id}) with ${Object.keys(resultMap).length} parameters!`);
+  } else {
+    console.log(`[LIMS INGEST] Ingested ${Object.keys(resultMap).length} parameters for barcode ${parsed.barcode} (Pending Worklist Accession).`);
+  }
+
+  db.machine_ingest_queue.unshift({
+    ingestId: `INGEST-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    channel: remoteChannel,
+    barcode: parsed.barcode,
+    patientId: matchedPatient ? matchedPatient.id : null,
+    patientName: matchedPatient ? matchedPatient.name : parsed.patientName,
+    results: resultMap,
+    status: matchedPatient ? 'ASSIGNED' : 'UNASSIGNED_SAMPLE'
+  });
+  if (db.machine_ingest_queue.length > 100) db.machine_ingest_queue.pop();
+
+  saveDb(db);
+  return rawEntry;
+}
+
+// Start Native TCP Socket Server on Port 8080 (Matching AVECON & standard analyzers)
+let tcpServer = null;
+try {
+  tcpServer = net.createServer((socket) => {
+    tcpServerStatus.activeConnections++;
+    const clientAddr = `${socket.remoteAddress}:${socket.remotePort}`;
+    console.log(`[TCP INTERFACE] Analyzer connected from: ${clientAddr}`);
+
+    socket.setKeepAlive(true, 10000);
+    socket.setTimeout(30000);
+
+    let buffer = '';
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('latin1');
+      tcpServerStatus.lastPacketReceivedAt = new Date().toISOString();
+
+      const isHL7Done = buffer.includes('\x1c\r') || (buffer.includes('MSH') && buffer.includes('OBX') && buffer.endsWith('\r\n'));
+      const isASTMDone = buffer.includes('\x04') || buffer.includes('L|1');
+
+      if (isHL7Done || isASTMDone || buffer.length > 8192) {
+        console.log(`[TCP INTERFACE] Complete analyzer frame captured (${buffer.length} bytes)`);
+        const parsed = parseRawAnalyzerPacket(buffer);
+        if (parsed) {
+          ingestAnalyzerResults(parsed, buffer, `TCP_${clientAddr}`);
+          tcpServerStatus.totalPacketsIngested++;
+
+          if (parsed.isHL7) {
+            const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
+            const ack = `\x0bMSH|^~\\&|LIMS|HOST|ANALYZER|AVECON|${timestamp}||ACK^R01|MSG00001|P|2.3.1\rMSA|AA|MSG00001|Success\r\x1c\r`;
+            socket.write(ack);
+          } else {
+            socket.write('\x06');
+          }
+        }
+        buffer = '';
+      }
+    });
+
+    socket.on('timeout', () => {
+      console.log(`[TCP TIMEOUT] Idle socket timeout from ${clientAddr}, closing.`);
+      socket.destroy();
+    });
+
+    socket.on('error', (err) => {
+      console.warn(`[TCP SOCKET ERROR] from ${clientAddr}:`, err.message);
+    });
+
+    socket.on('close', () => {
+      tcpServerStatus.activeConnections = Math.max(0, tcpServerStatus.activeConnections - 1);
+      console.log(`[TCP INTERFACE] Analyzer disconnected: ${clientAddr}`);
+    });
+  });
+
+  tcpServer.on('error', (err) => {
+    console.warn(`[TCP SERVER NOTICE] Port ${TCP_PORT} notice:`, err.message);
+  });
+
+  tcpServer.listen(TCP_PORT, () => {
+    console.log(`🔌 Native Analyzer TCP Socket Server Active on Port ${TCP_PORT} (Listening for AVECON / Mindray / Erba / Sysmex)`);
+  });
+} catch (e) {
+  console.warn('Could not initialize native TCP server:', e.message);
+}
+
 server.listen(PORT, () => {
   console.log(`\n======================================================`);
   console.log(`🏥 Modern Diagnostic LIMS - Standalone Central Engine`);
   console.log(`🌐 Local Application URL: http://localhost:${PORT}`);
+  console.log(`🔌 Hardware TCP Server: Active on Port ${TCP_PORT}`);
   console.log(`📊 Test Master: Active (1,148 Diagnostic Tests & Modalities)`);
   console.log(`🔌 Machine Interface: Active (ASTM / HL7 Drivers)`);
   console.log(`💾 Auto-Backup: Active (Destination: C:\\ModernLIMS_Backups)`);

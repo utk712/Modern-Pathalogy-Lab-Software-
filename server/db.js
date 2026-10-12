@@ -116,14 +116,52 @@ const DEFAULT_DB_DATA = {
   machines: STANDARD_MACHINES,
   inventory: [],
   b2bCenters: [],
+  universal_raw_buffer_queue: [],
+  machine_ingest_queue: [],
   qcRuns: [],
   activeSessions: {}
 };
 
+// Thread-safe Task Queue Handler for Rapid Consecutive Ingestion Writes
+class DatabaseQueueController {
+  constructor() {
+    this.queue = [];
+    this.isProcessing = false;
+  }
+
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ task, resolve, reject });
+      this.processNext();
+    });
+  }
+
+  async processNext() {
+    if (this.isProcessing || this.queue.length === 0) return;
+    this.isProcessing = true;
+
+    const { task, resolve, reject } = this.queue.shift();
+
+    try {
+      const result = await task();
+      resolve(result);
+    } catch (err) {
+      reject(err);
+    } finally {
+      this.isProcessing = false;
+      this.processNext();
+    }
+  }
+}
+
+const dbQueue = new DatabaseQueueController();
+
 function getDb() {
   try {
     if (!fs.existsSync(DB_FILE)) {
-      fs.writeFileSync(DB_FILE, JSON.stringify(DEFAULT_DB_DATA, null, 2), 'utf-8');
+      const tempInit = `${DB_FILE}.tmp`;
+      fs.writeFileSync(tempInit, JSON.stringify(DEFAULT_DB_DATA, null, 2), 'utf-8');
+      fs.renameSync(tempInit, DB_FILE);
       return DEFAULT_DB_DATA;
     }
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
@@ -138,6 +176,9 @@ function getDb() {
       saveDb(parsed);
     }
 
+    if (!parsed.universal_raw_buffer_queue) parsed.universal_raw_buffer_queue = [];
+    if (!parsed.machine_ingest_queue) parsed.machine_ingest_queue = [];
+
     return parsed;
   } catch (err) {
     console.error('Error reading database file, returning default clean dataset:', err);
@@ -147,14 +188,19 @@ function getDb() {
 
 function saveDb(data) {
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    // Atomic file replacement using temporary staging file to eliminate race conditions
+    const tempFile = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tempFile, DB_FILE);
     return true;
   } catch (err) {
     console.error('Error saving database file:', err);
     // Fallback save attempt in local dir if AppData fails
     try {
       const fallbackFile = path.join(__dirname, 'lims_database.json');
-      fs.writeFileSync(fallbackFile, JSON.stringify(data, null, 2), 'utf-8');
+      const fallbackTemp = `${fallbackFile}.tmp`;
+      fs.writeFileSync(fallbackTemp, JSON.stringify(data, null, 2), 'utf-8');
+      fs.renameSync(fallbackTemp, fallbackFile);
       return true;
     } catch (_) {
       return false;
@@ -162,9 +208,18 @@ function saveDb(data) {
   }
 }
 
+function saveDbAsync(data) {
+  return dbQueue.enqueue(() => {
+    return Promise.resolve(saveDb(data));
+  });
+}
+
 module.exports = {
   getDb,
   saveDb,
+  saveDbAsync,
+  read: getDb,
+  write: saveDbAsync,
   DB_FILE,
   LIMS_DATA_DIR
 };
