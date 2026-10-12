@@ -1,0 +1,57 @@
+{
+  "masterVendorConfig": {
+    "labName": "Modern Diagnostic Pathology Lab",
+    "securityKey": "LIMS-180D-MODERN-6B7DC6DD-7211-0949-CAB6",
+    "defaultUsername": "admin",
+    "defaultPassword": "admin123",
+    "durationValue": 180,
+    "durationUnit": "days",
+    "expiryTimestamp": 1803405021556,
+    "formattedExpiry": "23 Feb 2027, 23:20:21"
+  },
+  "licenseInfo": {
+    "labName": "Modern Diagnostic Pathology Lab",
+    "licenseKey": "LIMS-180D-MODERN-6B7DC6DD-7211-0949-CAB6",
+    "expiryTimestamp": 1803405021556,
+    "formattedExpiry": "23 Feb 2027, 23:20:21",
+    "isExpired": false
+  },
+  "labProfile": {
+    "labName": "Modern Diagnostic Pathology Lab",
+    "adminUsername": "admin",
+    "adminPassword": "admin123",
+    "isRegistered": false,
+    "address": "",
+    "city": "",
+    "pathologistName": ""
+  },
+  "patients": [],
+  "tests": [],
+  "machines": [
+    {
+      "id": "M-01",
+      "name": "Mindray BC-5000 5-Part Auto Hematology Analyzer",
+      "type": "Hematology",
+      "port": "COM3",
+      "baudRate": 9600,
+      "protocol": "ASTM 1394-97",
+      "ipAddress": "192.168.1.101",
+      "status": "ONLINE",
+      "lastSync": "Real-Time Driver Active"
+    },
+    {
+      "id": "M-02",
+      "name": "AVECON MaxCOUNT HMT-60P 3-Part Hematology Analyzer",
+      "type": "Hematology",
+      "port": "COM1 / LAN",
+      "baudRate": 9600,
+      "protocol": "HL7 v2.5",
+      "ipAddress": "192.168.1.105",
+      "status": "ONLINE",
+      "lastSync": "HL7 Driver Active"
+    }
+  ],
+  "inventory": [],
+  "b2bCenters": [],
+  "activeSessions": {}
+}

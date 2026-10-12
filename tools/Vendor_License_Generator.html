@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vendor Master License & Lab Client Portal • PulseLab Diagnostic LIMS</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 sm:p-8 selection:bg-sky-500 selection:text-white">
+
+  <div class="max-w-6xl mx-auto space-y-6">
+    
+    <!-- Top Vendor Header -->
+    <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div class="flex items-center space-x-4">
+        <div class="h-14 w-14 rounded-2xl bg-gradient-to-tr from-sky-500 via-indigo-600 to-indigo-800 text-white flex items-center justify-center font-black text-2xl shadow-lg shadow-sky-500/20">
+          🔑
+        </div>
+        <div>
+          <div class="flex items-center space-x-2">
+            <h1 class="text-xl font-extrabold text-white tracking-tight">Vendor Client & License Directory</h1>
+            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-950 text-sky-400 border border-sky-800">
+              Private Admin Portal
+            </span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5 font-medium">
+            Manage every laboratory's account, active 6-month security keys, and automated AMC renewals.
+          </p>
+        </div>
+      </div>
+
+      <!-- Quick Header Actions -->
+      <div class="flex items-center space-x-3">
+        <button
+          onclick="openAddLabModal()"
+          class="px-4 py-2.5 bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold rounded-xl text-xs shadow-md shadow-sky-500/20 transition-all flex items-center space-x-2 cursor-pointer"
+        >
+          <span>+ Register New Client Lab</span>
+        </button>
+        <button
+          onclick="exportDatabase()"
+          class="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs border border-slate-700 transition-all flex items-center space-x-1.5 cursor-pointer"
+          title="Backup Client Database to JSON"
+        >
+          <span>💾 Backup Data</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Summary KPI Cards -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div class="bg-slate-900 border border-slate-800/80 p-4 rounded-2xl">
+        <span class="text-xs text-slate-400 font-semibold">Total Client Labs</span>
+        <p id="kpiTotalLabs" class="text-2xl font-black text-white mt-1">0</p>
+      </div>
+      <div class="bg-slate-900 border border-slate-800/80 p-4 rounded-2xl">
+        <span class="text-xs text-emerald-400 font-semibold">Active 6M Licenses</span>
+        <p id="kpiActiveLabs" class="text-2xl font-black text-emerald-400 mt-1">0</p>
+      </div>
+      <div class="bg-slate-900 border border-slate-800/80 p-4 rounded-2xl">
+        <span class="text-xs text-amber-400 font-semibold">Expiring Soon (&lt; 15d)</span>
+        <p id="kpiExpiringSoon" class="text-2xl font-black text-amber-400 mt-1">0</p>
+      </div>
+      <div class="bg-slate-900 border border-slate-800/80 p-4 rounded-2xl">
+        <span class="text-xs text-rose-400 font-semibold">Maintenance Due / Expired</span>
+        <p id="kpiExpired" class="text-2xl font-black text-rose-400 mt-1">0</p>
+      </div>
+    </div>
+
+    <!-- Client Directory Search & Table -->
+    <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
+      
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+        <div class="flex items-center space-x-2">
+          <h2 class="font-bold text-base text-white">Registered Laboratory Accounts</h2>
+          <span id="accountCountBadge" class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-800 text-slate-300">0 Labs</span>
+        </div>
+
+        <div class="flex items-center space-x-2 w-full sm:w-72">
+          <input
+            type="text"
+            id="searchInput"
+            oninput="renderLabsTable()"
+            placeholder="Search by Lab Name, City, Phone..."
+            class="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-500"
+          />
+        </div>
+      </div>
+
+      <!-- Laboratory Accounts Table -->
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr class="border-b border-slate-800 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+              <th class="py-3 px-3">Laboratory Details</th>
+              <th class="py-3 px-3">Contact & City</th>
+              <th class="py-3 px-3">Active Security Key</th>
+              <th class="py-3 px-3">Validity Status</th>
+              <th class="py-3 px-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="labsTableBody" class="divide-y divide-slate-800/60">
+            <!-- Dynamic Rows -->
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- Modal: Add New Laboratory Account -->
+  <div id="addLabModal" class="hidden fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center space-x-2">
+          <span class="text-lg">🏥</span>
+          <h3 class="font-bold text-base text-white">Register Client Lab Account</h3>
+        </div>
+        <button onclick="closeAddLabModal()" class="text-slate-400 hover:text-white p-1">✕</button>
+      </div>
+
+      <form onsubmit="handleSaveNewLab(event)" class="space-y-4 text-xs">
+        <div class="space-y-1">
+          <label class="font-bold text-slate-300">Laboratory / Hospital Name <span class="text-rose-400">*</span></label>
+          <input
+            type="text"
+            id="newLabName"
+            required
+            placeholder="e.g. Modern Diagnostic Pathology Lab"
+            class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-semibold focus:ring-2 focus:ring-sky-500 focus:outline-none"
+          />
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div class="space-y-1">
+            <label class="font-bold text-slate-300">Doctor / Owner Name</label>
+            <input
+              type="text"
+              id="newDoctorName"
+              placeholder="e.g. Dr. Rajesh Sharma"
+              class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-sky-500 focus:outline-none"
+            />
+          </div>
+          <div class="space-y-1">
+            <label class="font-bold text-slate-300">Mobile / WhatsApp No.</label>
+            <input
+              type="text"
+              id="newPhone"
+              placeholder="e.g. 9876543210"
+              class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-sky-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div class="space-y-1">
+            <label class="font-bold text-slate-300">City / Location</label>
+            <input
+              type="text"
+              id="newCity"
+              placeholder="e.g. Mumbai"
+              class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white focus:ring-2 focus:ring-sky-500 focus:outline-none"
+            />
+          </div>
+          <div class="space-y-1">
+            <label class="font-bold text-slate-300">Initial License Duration</label>
+            <select
+              id="newDuration"
+              class="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-bold focus:ring-2 focus:ring-sky-500 focus:outline-none"
+            >
+              <option value="180">⭐ 6 Months (180 Days)</option>
+              <option value="365">📅 1 Year (365 Days)</option>
+              <option value="30">⏱️ 1 Month Trial</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="pt-3 border-t border-slate-800 flex justify-end space-x-2">
+          <button
+            type="button"
+            onclick="closeAddLabModal()"
+            class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="px-5 py-2 bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-extrabold rounded-xl shadow-md cursor-pointer"
+          >
+            Create Account & Generate Key
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- JavaScript Cryptography & Account Manager Engine -->
+  <script>
+    const MASTER_SALT = 'PULSE_LIMS_MASTER_VENDOR_SECRET_KEY_2026_SECURE_AUTH';
+    const DB_STORAGE_KEY = 'pulselab_vendor_client_accounts';
+
+    function sha256(ascii) {
+      function rightRotate(value, amount) { return (value >>> amount) | (value << (32 - amount)); }
+      const mathPow = Math.pow;
+      let lengthProperty = 'length';
+      let i, j, result = '';
+      const words = [];
+      const asciiBitLength = ascii[lengthProperty] * 8;
+      let hash = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+      const k = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+      ];
+      let compositeArray = [];
+      for (i = 0; i < ascii[lengthProperty]; i++) compositeArray[i] = ascii.charCodeAt(i);
+      compositeArray[compositeArray[lengthProperty]] = 0x80;
+      while (compositeArray[lengthProperty] % 64 !== 56) compositeArray.push(0);
+      for (i = 0; i < 8; i++) compositeArray.push((asciiBitLength >>> (56 - i * 8)) & 0xff);
+      for (i = 0; i < compositeArray[lengthProperty]; i += 4) {
+        words.push((compositeArray[i] << 24) | (compositeArray[i + 1] << 16) | (compositeArray[i + 2] << 8) | compositeArray[i + 3]);
+      }
+      for (j = 0; j < words[lengthProperty]; j += 16) {
+        const w = words.slice(j, j + 16);
+        let a = hash[0], b = hash[1], c = hash[2], d = hash[3], e = hash[4], f = hash[5], g = hash[6], h = hash[7];
+        for (i = 0; i < 64; i++) {
+          if (i >= 16) {
+            const gamma0 = rightRotate(w[i - 15], 7) ^ rightRotate(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+            const gamma1 = rightRotate(w[i - 2], 17) ^ rightRotate(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+            w[i] = (w[i - 16] + gamma0 + w[i - 7] + gamma1) | 0;
+          }
+          const s1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25);
+          const ch = (e & f) ^ (~e & g);
+          const temp1 = (h + s1 + ch + k[i] + w[i]) | 0;
+          const s0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22);
+          const maj = (a & b) ^ (a & c) ^ (b & c);
+          const temp2 = (s0 + maj) | 0;
+          h = g; g = f; f = e; e = (d + temp1) | 0; d = c; c = b; b = a; a = (temp1 + temp2) | 0;
+        }
+        hash[0] = (hash[0] + a) | 0; hash[1] = (hash[1] + b) | 0; hash[2] = (hash[2] + c) | 0; hash[3] = (hash[3] + d) | 0;
+        hash[4] = (hash[4] + e) | 0; hash[5] = (hash[5] + f) | 0; hash[6] = (hash[6] + g) | 0; hash[7] = (hash[7] + h) | 0;
+      }
+      for (i = 0; i < 8; i++) {
+        for (j = 3; j >= 0; j--) {
+          const b = (hash[i] >>> (j * 8)) & 255;
+          result += (b < 16 ? '0' : '') + b.toString(16);
+        }
+      }
+      return result;
+    }
+
+    function createKey(rawName, validityDays) {
+      const normLab = rawName.toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
+      const labCode = normLab.substring(0, 6).padEnd(6, 'X');
+      const now = Date.now();
+      const expiry = now + (validityDays * 24 * 60 * 60 * 1000);
+      const expiryHex = Math.floor(expiry / 1000).toString(16).toUpperCase().padStart(8, '0');
+      const daysCode = validityDays >= 999 ? 'LFT' : `${validityDays}D`.padStart(4, '0');
+
+      const payload = `${labCode}:${expiryHex}:${daysCode}:${MASTER_SALT}`;
+      const signature = sha256(payload).toUpperCase();
+
+      const sigPart1 = signature.substring(0, 4);
+      const sigPart2 = signature.substring(4, 8);
+      const sigPart3 = signature.substring(8, 12);
+
+      const licenseKey = `LIMS-${daysCode}-${labCode}-${expiryHex}-${sigPart1}-${sigPart2}-${sigPart3}`;
+      const formattedExpiry = new Date(expiry).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+
+      return {
+        licenseKey,
+        expiryTimestamp: expiry,
+        formattedExpiry,
+        issuedDate: new Date(now).toISOString()
+      };
+    }
+
+    function getStoredLabs() {
+      const raw = localStorage.getItem(DB_STORAGE_KEY);
+      if (!raw) {
+        // Initial Sample Lab
+        const initial = [
+          {
+            id: 'LAB-001',
+            name: 'Modern Diagnostic Pathology Lab',
+            doctorName: 'Dr. Rajesh Sharma',
+            phone: '9876543210',
+            city: 'Mumbai Central',
+            currentKey: 'LIMS-180D-MODERN-6B76CD80-0FD1-1785-F5B6',
+            validityDays: 180,
+            expiryTimestamp: Date.now() + 180 * 24 * 60 * 60 * 1000,
+            formattedExpiry: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+          }
+        ];
+        localStorage.setItem(DB_STORAGE_KEY, JSON.stringify(initial));
+        return initial;
+      }
+      return JSON.parse(raw);
+    }
+
+    function saveStoredLabs(labs) {
+      localStorage.setItem(DB_STORAGE_KEY, JSON.stringify(labs));
+      renderLabsTable();
+    }
+
+    function renderLabsTable() {
+      const labs = getStoredLabs();
+      const search = (document.getElementById('searchInput').value || '').toLowerCase().trim();
+      const tbody = document.getElementById('labsTableBody');
+      const now = Date.now();
+
+      let activeCount = 0;
+      let expiringSoonCount = 0;
+      let expiredCount = 0;
+
+      const filtered = labs.filter(l => {
+        return l.name.toLowerCase().includes(search) ||
+               (l.doctorName || '').toLowerCase().includes(search) ||
+               (l.city || '').toLowerCase().includes(search) ||
+               (l.phone || '').includes(search);
+      });
+
+      labs.forEach(l => {
+        const msRemaining = l.expiryTimestamp - now;
+        const days = Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
+        if (days <= 0) expiredCount++;
+        else if (days <= 15) { expiringSoonCount++; activeCount++; }
+        else activeCount++;
+      });
+
+      document.getElementById('kpiTotalLabs').innerText = labs.length;
+      document.getElementById('kpiActiveLabs').innerText = activeCount;
+      document.getElementById('kpiExpiringSoon').innerText = expiringSoonCount;
+      document.getElementById('kpiExpired').innerText = expiredCount;
+      document.getElementById('accountCountBadge').innerText = `${labs.length} Labs`;
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-center py-8 text-slate-500">No laboratory accounts found matching search.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map(lab => {
+        const msRemaining = lab.expiryTimestamp - now;
+        const days = Math.ceil(msRemaining / (1000 * 60 * 60 * 24));
+        const isExpired = days <= 0;
+        const isExpiringSoon = days > 0 && days <= 15;
+
+        let statusBadge = `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">${days} Days Left</span>`;
+        if (isExpired) {
+          statusBadge = `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-950 text-rose-400 border border-rose-800 animate-pulse">Expired (Renewal Due)</span>`;
+        } else if (isExpiringSoon) {
+          statusBadge = `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950 text-amber-400 border border-amber-800 animate-pulse">Expires in ${days}d</span>`;
+        }
+
+        return `
+          <tr class="hover:bg-slate-950/50 transition-colors">
+            <td class="py-3 px-3">
+              <p class="font-extrabold text-white text-sm">${lab.name}</p>
+              <p class="text-[11px] text-slate-400 font-mono">ID: ${lab.id}</p>
+            </td>
+            <td class="py-3 px-3">
+              <p class="font-medium text-slate-300">${lab.doctorName || 'N/A'}</p>
+              <p class="text-[11px] text-slate-500">${lab.city || 'Central'} • ${lab.phone || 'No phone'}</p>
+            </td>
+            <td class="py-3 px-3">
+              <div class="flex items-center space-x-2">
+                <code class="font-mono text-xs font-bold text-sky-300 bg-slate-950 px-2 py-1 rounded border border-slate-800 select-all">${lab.currentKey}</code>
+                <button onclick="copyToClipboard('${lab.currentKey}', this)" class="p-1 text-slate-400 hover:text-white" title="Copy Key">📋</button>
+              </div>
+            </td>
+            <td class="py-3 px-3">
+              <div class="space-y-1">
+                ${statusBadge}
+                <p class="text-[10px] text-slate-500 font-mono">Valid until: ${lab.formattedExpiry}</p>
+              </div>
+            </td>
+            <td class="py-3 px-3 text-right">
+              <div class="flex items-center justify-end space-x-1.5">
+                <button
+                  onclick="renewLab('${lab.id}')"
+                  class="px-2.5 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg text-[11px] transition-all flex items-center space-x-1 cursor-pointer"
+                  title="Renew for next 6 Months (180 Days)"
+                >
+                  <span>⚡ Renew 6M</span>
+                </button>
+                <button
+                  onclick="shareWhatsApp('${lab.id}')"
+                  class="p-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs"
+                  title="Copy WhatsApp Key Message"
+                >
+                  💬
+                </button>
+                <button
+                  onclick="deleteLab('${lab.id}')"
+                  class="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg text-xs"
+                  title="Delete Account"
+                >
+                  🗑️
+                </button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function openAddLabModal() {
+      document.getElementById('addLabModal').classList.remove('hidden');
+      document.getElementById('newLabName').focus();
+    }
+
+    function closeAddLabModal() {
+      document.getElementById('addLabModal').classList.add('hidden');
+    }
+
+    function handleSaveNewLab(e) {
+      e.preventDefault();
+      const name = document.getElementById('newLabName').value.trim();
+      const doctorName = document.getElementById('newDoctorName').value.trim();
+      const phone = document.getElementById('newPhone').value.trim();
+      const city = document.getElementById('newCity').value.trim();
+      const duration = parseInt(document.getElementById('newDuration').value, 10);
+
+      const keyData = createKey(name, duration);
+
+      const labs = getStoredLabs();
+      const newAccount = {
+        id: `LAB-${String(labs.length + 1).padStart(3, '0')}`,
+        name,
+        doctorName,
+        phone,
+        city,
+        currentKey: keyData.licenseKey,
+        validityDays: duration,
+        expiryTimestamp: keyData.expiryTimestamp,
+        formattedExpiry: keyData.formattedExpiry
+      };
+
+      labs.unshift(newAccount);
+      saveStoredLabs(labs);
+      closeAddLabModal();
+      alert(`✅ Laboratory "${name}" successfully registered with 6-Month Key:\n\n${keyData.licenseKey}`);
+    }
+
+    function renewLab(labId) {
+      const labs = getStoredLabs();
+      const lab = labs.find(l => l.id === labId);
+      if (!lab) return;
+
+      if (confirm(`Renew 6-Month Security License for "${lab.name}"?`)) {
+        const keyData = createKey(lab.name, 180);
+        lab.currentKey = keyData.licenseKey;
+        lab.expiryTimestamp = keyData.expiryTimestamp;
+        lab.formattedExpiry = keyData.formattedExpiry;
+        saveStoredLabs(labs);
+        alert(`✅ Successfully Renewed 6 Months for ${lab.name}!\n\nNew Key: ${keyData.licenseKey}\nValid Until: ${keyData.formattedExpiry}`);
+      }
+    }
+
+    function shareWhatsApp(labId) {
+      const labs = getStoredLabs();
+      const lab = labs.find(l => l.id === labId);
+      if (!lab) return;
+
+      const msg = `*Modern Diagnostic LIMS - Security License Key*\n\n` +
+                  `🏥 *Laboratory:* ${lab.name}\n` +
+                  `👨‍⚕️ *Contact:* ${lab.doctorName || 'Doctor'}\n` +
+                  `🔑 *Security Key:* \`${lab.currentKey}\`\n` +
+                  `⏱️ *Valid Until:* ${lab.formattedExpiry}\n\n` +
+                  `*Instructions:*\n` +
+                  `1. Open Modern Diagnostic LIMS on your PC.\n` +
+                  `2. Enter your Lab Name and paste the Security Key above.\n` +
+                  `3. Click "Activate Software".`;
+
+      navigator.clipboard.writeText(msg);
+      alert(`💬 WhatsApp Message Copied for ${lab.name}!\nYou can paste it directly in your WhatsApp chat with the client.`);
+    }
+
+    function copyToClipboard(text, btn) {
+      navigator.clipboard.writeText(text);
+      btn.innerText = '✅';
+      setTimeout(() => { btn.innerText = '📋'; }, 2000);
+    }
+
+    function deleteLab(labId) {
+      if (confirm('Are you sure you want to remove this laboratory account from your directory?')) {
+        let labs = getStoredLabs();
+        labs = labs.filter(l => l.id !== labId);
+        saveStoredLabs(labs);
+      }
+    }
+
+    function exportDatabase() {
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(getStoredLabs(), null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `LIMS_Client_License_Accounts_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    }
+
+    // Initialize on load
+    renderLabsTable();
+  </script>
+</body>
+</html>

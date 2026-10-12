@@ -1,0 +1,24 @@
+[
+  {
+    "Id": "LAB-002",
+    "Name": "Om Laboratory",
+    "DoctorName": "Utkarsh",
+    "Phone": "9302579140",
+    "City": "betul",
+    "CurrentKey": "LIMS-180000D-OMLABO-6B76D213-33DB-0414-6320",
+    "ValidityDays": 180,
+    "ExpiryTimestamp": 1802949139000,
+    "FormattedExpiry": "18 Feb 2027"
+  },
+  {
+    "Id": "LAB-001",
+    "Name": "Modern Diagnostic Pathology Lab",
+    "DoctorName": "Dr. Rajesh Sharma",
+    "Phone": "9876543210",
+    "City": "Mumbai Central",
+    "CurrentKey": "LIMS-180000D-MODERN-6B76D1E9-513F-A4DB-2307",
+    "ValidityDays": 180,
+    "ExpiryTimestamp": 1802949097000,
+    "FormattedExpiry": "18 Feb 2027"
+  }
+]

@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --primary: 2 132 199;
+    --primary-foreground: 255 255 255;
+    --background: 248 250 252;
+    --foreground: 15 23 42;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased font-sans;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Medical Report Print Optimizations */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-report, #printable-report * {
+    visibility: visible;
+  }
+  #printable-report {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: white;
+  }
+  .report-page-card {
+    page-break-after: always !important;
+    break-after: page !important;
+    margin: 0 !important;
+    padding: 24px !important;
+    border: none !important;
+    box-shadow: none !important;
+    min-height: 100vh !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
+
+/* Vial tube color badges */
+.tube-edta {
+  @apply bg-purple-100 text-purple-800 border-purple-300;
+}
+.tube-serum {
+  @apply bg-amber-100 text-amber-800 border-amber-300;
+}
+.tube-fluoride {
+  @apply bg-slate-200 text-slate-800 border-slate-400;
+}
+.tube-citrate {
+  @apply bg-sky-100 text-sky-800 border-sky-300;
+}
+.tube-plain {
+  @apply bg-red-100 text-red-800 border-red-300;
+}
+.tube-urine {
+  @apply bg-yellow-100 text-yellow-800 border-yellow-300;
+}
