@@ -3,6 +3,10 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { getDb, saveDb } = require('./db.js');
+const { attachWebSocketServer, handleSseConnection, broadcastLiveSync } = require('./websocket_server.js');
+const { isAnalyzerQuery, handleAnalyzerQuery } = require('./bidirectional_controller.js');
+const { processThroughQCGate, commitStagedRecord, rejectStagedRecord } = require('./qc_gate.js');
+const { scanAvailableCOMPorts, connectSerialPort, disconnectSerialPort, getSerialStatus } = require('./serial_driver.js');
 
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 const PORT = process.env.PORT || 5000;
@@ -578,6 +582,118 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // 6.2b REAL-TIME HARDWARE LIVE STREAM (SSE)
+    if (pathname === '/api/hardware/sse' && req.method === 'GET') {
+      handleSseConnection(req, res);
+      return;
+    }
+
+    // 6.2c QC VALIDATION GATE - STAGED RESULTS QUEUE
+    if (pathname === '/api/hardware/qc-staged' && req.method === 'GET') {
+      const db = getDb();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(db.machine_staged_queue || []));
+      return;
+    }
+
+    // 6.2d QC VALIDATION GATE - COMMIT STAGED RESULT
+    if (pathname === '/api/hardware/qc-staged/commit' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const { stagedId, techName } = body;
+      const db = getDb();
+      const outcome = commitStagedRecord(stagedId, db, techName || 'Laboratory Technologist');
+      if (outcome.success) {
+        saveDb(db);
+        broadcastLiveSync('QC_STAGED_COMMITTED', outcome);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'Result verified and committed to patient record.', patient: outcome.patient }));
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(outcome));
+      }
+      return;
+    }
+
+    // 6.2e QC VALIDATION GATE - REJECT STAGED RESULT
+    if (pathname === '/api/hardware/qc-staged/reject' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const { stagedId, reason } = body;
+      const db = getDb();
+      const outcome = rejectStagedRecord(stagedId, db, reason || 'Specimen flagged during technical review');
+      if (outcome.success) {
+        saveDb(db);
+        broadcastLiveSync('QC_STAGED_REJECTED', outcome);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'Result rejected.', record: outcome.record }));
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(outcome));
+      }
+      return;
+    }
+
+    // 6.2f PHYSICAL & VIRTUAL COM SERIAL PORTS
+    if (pathname === '/api/hardware/com-ports' && req.method === 'GET') {
+      const info = await scanAvailableCOMPorts();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(info));
+      return;
+    }
+
+    if (pathname === '/api/hardware/com-connect' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const { port, baudRate } = body;
+      const outcome = connectSerialPort(port, baudRate, (text, channel) => {
+        handleRawHardwareData(text, channel);
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
+      return;
+    }
+
+    if (pathname === '/api/hardware/com-disconnect' && req.method === 'POST') {
+      const outcome = disconnectSerialPort();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
+      return;
+    }
+
+    if (pathname === '/api/hardware/serial-status' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getSerialStatus()));
+      return;
+    }
+
+    // 6.2g BI-DIRECTIONAL ORDER QUERY TESTING & LOGS
+    if (pathname === '/api/machines/query-order' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const db = getDb();
+      const rawText = body.rawQuery || `Q|1|^${body.barcode || 'SMP-951143-1'}||ALL||||||||O`;
+      const result = handleAnalyzerQuery(rawText, db, 'SIMULATED_QUERY');
+      if (result && result.logEntry) {
+        saveDb(db);
+        broadcastLiveSync('BIDIRECTIONAL_ORDER_DISPATCHED', result.logEntry);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    if (pathname === '/api/machines/query-logs' && req.method === 'GET') {
+      const db = getDb();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(db.bidirectional_query_logs || []));
+      return;
+    }
+
+    if (pathname === '/api/machines/pending-orders' && req.method === 'GET') {
+      const db = getDb();
+      const pending = (db.patients || []).filter(p => p.status === 'Registered' || p.status === 'Sample Collected');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ count: pending.length, patients: pending }));
+      return;
+    }
+
     // 6.3 HARDWARE STATUS
     if (pathname === '/api/hardware/status' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -845,24 +961,16 @@ function ingestAnalyzerResults(parsed, rawText, remoteChannel) {
     }
   }
 
-  if (matchedPatient) {
-    matchedPatient.status = 'Results Entered';
-    matchedPatient.results = { ...(matchedPatient.results || {}), ...resultMap };
-    
-    if (Array.isArray(matchedPatient.tests)) {
-      matchedPatient.tests = matchedPatient.tests.map(t => ({
-        ...t,
-        status: 'Results Entered',
-        results: { ...(t.results || {}), ...resultMap }
-      }));
-    }
+  // Pass through Clinical QC Validation & Staging Gate
+  const stagedRecord = processThroughQCGate(parsed.barcode, resultMap, matchedPatient, db, remoteChannel);
 
+  if (matchedPatient) {
     rawEntry.matchedPatientId = matchedPatient.id;
     rawEntry.matchedPatientName = matchedPatient.name;
-    rawEntry.parsingStatus = 'MATCHED_TO_PATIENT';
-    console.log(`[LIMS INGEST] Automatically matched and updated patient ${matchedPatient.name} (${matchedPatient.id}) with ${Object.keys(resultMap).length} parameters!`);
+    rawEntry.parsingStatus = stagedRecord.status === 'AUTO_ACCEPTED' ? 'MATCHED_TO_PATIENT' : 'HELD_IN_QC_GATE';
+    console.log(`[LIMS INGEST] Patient ${matchedPatient.name} (${matchedPatient.id}) - Staged Status: ${stagedRecord.status}`);
   } else {
-    console.log(`[LIMS INGEST] Ingested ${Object.keys(resultMap).length} parameters for barcode ${parsed.barcode} (Pending Worklist Accession).`);
+    console.log(`[LIMS INGEST] Ingested ${Object.keys(resultMap).length} parameters for barcode ${parsed.barcode} (Held in Staging Queue).`);
   }
 
   db.machine_ingest_queue.unshift({
@@ -873,12 +981,61 @@ function ingestAnalyzerResults(parsed, rawText, remoteChannel) {
     patientId: matchedPatient ? matchedPatient.id : null,
     patientName: matchedPatient ? matchedPatient.name : parsed.patientName,
     results: resultMap,
-    status: matchedPatient ? 'ASSIGNED' : 'UNASSIGNED_SAMPLE'
+    status: matchedPatient ? stagedRecord.status : 'UNASSIGNED_SAMPLE'
   });
   if (db.machine_ingest_queue.length > 100) db.machine_ingest_queue.pop();
 
   saveDb(db);
-  return rawEntry;
+
+  // Broadcast in Real-Time to WebSockets & SSE subscribers
+  broadcastLiveSync('ANALYZER_PACKET_RECEIVED', {
+    rawEntry,
+    stagedRecord,
+    patient: matchedPatient
+  });
+
+  return { rawEntry, stagedRecord };
+}
+
+// Unified Hardware Ingestion Router for TCP & Serial
+function handleRawHardwareData(rawText, remoteChannel, socket = null) {
+  const db = getDb();
+
+  // 1. Check for Bi-Directional Analyzer Query (ASTM Q record or HL7 QRY/QBP)
+  if (isAnalyzerQuery(rawText)) {
+    const queryOutcome = handleAnalyzerQuery(rawText, db, remoteChannel);
+    if (queryOutcome) {
+      if (queryOutcome.logEntry) {
+        saveDb(db);
+        broadcastLiveSync('BIDIRECTIONAL_ORDER_DISPATCHED', queryOutcome.logEntry);
+      }
+      if (socket && queryOutcome.responsePayload) {
+        socket.write(queryOutcome.responsePayload);
+      }
+      return queryOutcome;
+    }
+  }
+
+  // 2. Parse Clinical Results Frame
+  const parsed = parseRawAnalyzerPacket(rawText);
+  if (parsed && Object.keys(parsed.parameters).length > 0) {
+    const outcome = ingestAnalyzerResults(parsed, rawText, remoteChannel);
+    tcpServerStatus.totalPacketsIngested++;
+
+    // Send ACK to physical analyzer
+    if (socket) {
+      if (parsed.isHL7) {
+        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
+        const ack = `\x0bMSH|^~\\&|LIMS|HOST|ANALYZER|AVECON|${timestamp}||ACK^R01|MSG00001|P|2.3.1\rMSA|AA|MSG00001|Success\r\x1c\r`;
+        socket.write(ack);
+      } else {
+        socket.write('\x06');
+      }
+    }
+    return outcome;
+  }
+
+  return null;
 }
 
 // Start Native TCP Socket Server on Port 8080 (Matching AVECON & standard analyzers)
@@ -899,23 +1056,11 @@ try {
       tcpServerStatus.lastPacketReceivedAt = new Date().toISOString();
 
       const isHL7Done = buffer.includes('\x1c\r') || (buffer.includes('MSH') && buffer.includes('OBX') && buffer.endsWith('\r\n'));
-      const isASTMDone = buffer.includes('\x04') || buffer.includes('L|1');
+      const isASTMDone = buffer.includes('\x04') || buffer.includes('L|1') || (buffer.includes('Q|') && buffer.includes('L|'));
 
       if (isHL7Done || isASTMDone || buffer.length > 8192) {
         console.log(`[TCP INTERFACE] Complete analyzer frame captured (${buffer.length} bytes)`);
-        const parsed = parseRawAnalyzerPacket(buffer);
-        if (parsed) {
-          ingestAnalyzerResults(parsed, buffer, `TCP_${clientAddr}`);
-          tcpServerStatus.totalPacketsIngested++;
-
-          if (parsed.isHL7) {
-            const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
-            const ack = `\x0bMSH|^~\\&|LIMS|HOST|ANALYZER|AVECON|${timestamp}||ACK^R01|MSG00001|P|2.3.1\rMSA|AA|MSG00001|Success\r\x1c\r`;
-            socket.write(ack);
-          } else {
-            socket.write('\x06');
-          }
-        }
+        handleRawHardwareData(buffer, `TCP_${clientAddr}`, socket);
         buffer = '';
       }
     });
@@ -946,13 +1091,19 @@ try {
   console.warn('Could not initialize native TCP server:', e.message);
 }
 
+// Attach Real-Time WebSocket Server
+attachWebSocketServer(server);
+
 server.listen(PORT, () => {
   console.log(`\n======================================================`);
   console.log(`🏥 Modern Diagnostic LIMS - Standalone Central Engine`);
   console.log(`🌐 Local Application URL: http://localhost:${PORT}`);
+  console.log(`⚡ WebSocket Live Sync: Active (ws://localhost:${PORT}/ws & /api/hardware/sse)`);
+  console.log(`🔄 Bi-Directional Order Engine: Active (ASTM Q / HL7 QRY Query Handler)`);
+  console.log(`🛡️ QC Validation Gate: Active (Panic Limit & Delta Check Staging)`);
   console.log(`🔌 Hardware TCP Server: Active on Port ${TCP_PORT}`);
+  console.log(`🔌 RS-232 Serial Port Driver: Ready (COM Port Scanning & Ingestion)`);
   console.log(`📊 Test Master: Active (1,148 Diagnostic Tests & Modalities)`);
-  console.log(`🔌 Machine Interface: Active (ASTM / HL7 Drivers)`);
   console.log(`💾 Auto-Backup: Active (Destination: C:\\ModernLIMS_Backups)`);
   console.log(`======================================================\n`);
   

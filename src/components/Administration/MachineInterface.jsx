@@ -15,7 +15,17 @@ import {
   Database,
   Link2,
   Layers,
-  Filter
+  Filter,
+  Zap,
+  Radio,
+  ShieldAlert,
+  AlertTriangle,
+  ArrowRightLeft,
+  Cable,
+  Check,
+  RefreshCw,
+  Send,
+  Play
 } from 'lucide-react';
 
 // Standard Clinical Analyzer Protocol Formats
@@ -134,10 +144,13 @@ const INITIAL_MAPPINGS = [
 export const MachineInterface = () => {
   const { addNotification } = useLab();
 
-  // Accordion Sections (All 4 Clinical Interface Sections)
+  // Accordion Sections (Clinical Interface & Automation Engine Sections)
   const [openSections, setOpenSections] = useState({
+    qcGate: true,
+    bidirectional: true,
+    serial: true,
     machines: false,
-    config: true,
+    config: false,
     params: false,
     mapping: true
   });
@@ -201,30 +214,245 @@ export const MachineInterface = () => {
   // Search filter
   const [mappingSearch, setMappingSearch] = useState('');
 
-  // Live Hardware Socket Stream State
+  // Live Hardware Socket Stream & WebSocket State
   const [hardwareStatus, setHardwareStatus] = useState({ port: 8080, status: 'ONLINE', activeConnections: 0 });
   const [rawStreamQueue, setRawStreamQueue] = useState([]);
   const [isSimulating, setIsSimulating] = useState(false);
+  const [wsStatus, setWsStatus] = useState('CONNECTING'); // 'CONNECTED' | 'FALLBACK_POLLING'
 
+  // QC Staging Gate State
+  const [stagedQueue, setStagedQueue] = useState([]);
+  const [isCommittingId, setIsCommittingId] = useState(null);
+
+  // Bi-Directional Order Query State
+  const [queryBarcode, setQueryBarcode] = useState('SMP-951143-1');
+  const [queryLogs, setQueryLogs] = useState([]);
+  const [lastQueryResult, setLastQueryResult] = useState(null);
+  const [isQuerying, setIsQuerying] = useState(false);
+
+  // RS-232 Physical & Virtual COM Port State
+  const [comPorts, setComPorts] = useState([]);
+  const [selectedPort, setSelectedPort] = useState('COM1');
+  const [baudRate, setBaudRate] = useState(9600);
+  const [serialStatus, setSerialStatus] = useState({ status: 'DISCONNECTED', bytesRead: 0 });
+  const [isSerialLoading, setIsSerialLoading] = useState(false);
+
+  const fetchHardwareInfo = () => {
+    fetch('http://localhost:5000/api/hardware/status')
+      .then(res => res.json())
+      .then(data => setHardwareStatus(data))
+      .catch(() => {});
+    
+    fetch('http://localhost:5000/api/hardware/raw-stream-queue')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data)) setRawStreamQueue(data);
+      })
+      .catch(() => {});
+  };
+
+  const fetchStagedQueue = () => {
+    fetch('http://localhost:5000/api/hardware/qc-staged')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data)) setStagedQueue(data);
+      })
+      .catch(() => {});
+  };
+
+  const fetchComPorts = () => {
+    fetch('http://localhost:5000/api/hardware/com-ports')
+      .then(res => res.json())
+      .then(data => {
+        if (data && Array.isArray(data.availablePorts)) {
+          setComPorts(data.availablePorts);
+          if (data.availablePorts.length > 0 && !data.availablePorts.includes(selectedPort)) {
+            setSelectedPort(data.availablePorts[0]);
+          }
+        }
+      })
+      .catch(() => {});
+  };
+
+  const fetchSerialStatus = () => {
+    fetch('http://localhost:5000/api/hardware/serial-status')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.status) setSerialStatus(data);
+      })
+      .catch(() => {});
+  };
+
+  const fetchQueryLogs = () => {
+    fetch('http://localhost:5000/api/machines/query-logs')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data)) setQueryLogs(data);
+      })
+      .catch(() => {});
+  };
+
+  // 1. WebSocket Live Stream Connection with Polling Fallback
   React.useEffect(() => {
-    const fetchHardwareInfo = () => {
-      fetch('http://localhost:5000/api/hardware/status')
-        .then(res => res.json())
-        .then(data => setHardwareStatus(data))
-        .catch(() => {});
-      
-      fetch('http://localhost:5000/api/hardware/raw-stream-queue')
-        .then(res => res.json())
-        .then(data => {
-          if (Array.isArray(data)) setRawStreamQueue(data);
-        })
-        .catch(() => {});
-    };
-
     fetchHardwareInfo();
-    const interval = setInterval(fetchHardwareInfo, 3000);
-    return () => clearInterval(interval);
+    fetchStagedQueue();
+    fetchComPorts();
+    fetchSerialStatus();
+    fetchQueryLogs();
+
+    let ws = null;
+    let isMounted = true;
+
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.hostname ? `${window.location.hostname}:5000` : 'localhost:5000';
+      ws = new WebSocket(`${protocol}//${host}/ws`);
+
+      ws.onopen = () => {
+        if (isMounted) setWsStatus('CONNECTED');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'ANALYZER_PACKET_RECEIVED') {
+            fetchHardwareInfo();
+            fetchStagedQueue();
+            addNotification('Real-Time Packet Ingested', `Packet captured from ${payload.data?.rawEntry?.channel || 'Analyzer'}`, 'info');
+          } else if (payload.type === 'BIDIRECTIONAL_ORDER_DISPATCHED') {
+            fetchQueryLogs();
+            addNotification('Bi-Directional Order Dispatched', `Worklist order sent to analyzer for ${payload.data?.barcode}`, 'success');
+          } else if (payload.type === 'QC_STAGED_COMMITTED' || payload.type === 'QC_STAGED_REJECTED') {
+            fetchStagedQueue();
+          }
+        } catch (err) {}
+      };
+
+      ws.onerror = () => {
+        if (isMounted) setWsStatus('FALLBACK_POLLING');
+      };
+
+      ws.onclose = () => {
+        if (isMounted) setWsStatus('FALLBACK_POLLING');
+      };
+    } catch (e) {
+      setWsStatus('FALLBACK_POLLING');
+    }
+
+    // Backup polling interval (runs every 3s as fallback)
+    const interval = setInterval(() => {
+      fetchHardwareInfo();
+      fetchStagedQueue();
+      fetchSerialStatus();
+    }, 3000);
+
+    return () => {
+      isMounted = false;
+      if (ws) ws.close();
+      clearInterval(interval);
+    };
   }, []);
+
+  // QC Staging Gate Actions
+  const handleCommitStaged = async (stagedId) => {
+    setIsCommittingId(stagedId);
+    try {
+      const res = await fetch('http://localhost:5000/api/hardware/qc-staged/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stagedId, techName: 'Authorized Lab Technologist' })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        addNotification('QC Gate Approved', 'Results verified and committed into active patient record!', 'success');
+        fetchStagedQueue();
+      } else {
+        addNotification('QC Gate Error', data.error || 'Could not commit result', 'error');
+      }
+    } catch (e) {
+      addNotification('Commit Error', e.message, 'error');
+    } finally {
+      setIsCommittingId(null);
+    }
+  };
+
+  const handleRejectStaged = async (stagedId) => {
+    try {
+      const res = await fetch('http://localhost:5000/api/hardware/qc-staged/reject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stagedId, reason: 'Technical review flag: Hemolyzed or unstable specimen' })
+      });
+      if (res.ok) {
+        addNotification('Sample Rejected', 'Staged analyzer result rejected and archived.', 'info');
+        fetchStagedQueue();
+      }
+    } catch (e) {
+      addNotification('Reject Error', e.message, 'error');
+    }
+  };
+
+  // Bi-Directional Query Action
+  const handleSendOrderQuery = async () => {
+    if (!queryBarcode.trim()) return;
+    setIsQuerying(true);
+    setLastQueryResult(null);
+    try {
+      const res = await fetch('http://localhost:5000/api/machines/query-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ barcode: queryBarcode.trim() })
+      });
+      const data = await res.json();
+      setLastQueryResult(data);
+      if (data.found) {
+        addNotification('Bi-Directional Order Found', `Found order for ${data.patient?.name || data.barcode} - Tests: ${data.testCodes}`, 'success');
+      } else {
+        addNotification('Query Completed', 'No matching order for this barcode. Analyzer will receive termination frame.', 'info');
+      }
+      fetchQueryLogs();
+    } catch (e) {
+      addNotification('Query Failed', e.message, 'error');
+    } finally {
+      setIsQuerying(false);
+    }
+  };
+
+  // RS-232 COM Port Actions
+  const handleConnectSerial = async () => {
+    setIsSerialLoading(true);
+    try {
+      const res = await fetch('http://localhost:5000/api/hardware/com-connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ port: selectedPort, baudRate: Number(baudRate) })
+      });
+      const data = await res.json();
+      if (data.success) {
+        addNotification('Serial Port Online', `Listening to ${selectedPort} at ${baudRate} baud`, 'success');
+        fetchSerialStatus();
+      } else {
+        addNotification('Serial Notice', data.error || 'Port notice', 'info');
+      }
+    } catch (e) {
+      addNotification('Serial Connection Error', e.message, 'error');
+    } finally {
+      setIsSerialLoading(false);
+    }
+  };
+
+  const handleDisconnectSerial = async () => {
+    setIsSerialLoading(true);
+    try {
+      await fetch('http://localhost:5000/api/hardware/com-disconnect', { method: 'POST' });
+      addNotification('Serial Disconnected', 'COM port closed.', 'info');
+      fetchSerialStatus();
+    } catch (e) {
+      addNotification('Disconnect Error', e.message, 'error');
+    } finally {
+      setIsSerialLoading(false);
+    }
+  };
 
   const handleSimulateAvecon = async () => {
     setIsSimulating(true);
@@ -256,7 +484,8 @@ export const MachineInterface = () => {
       });
 
       if (res.ok) {
-        addNotification('Machine Ingestion Success', 'Live AVECON test packet processed into patient record!', 'success');
+        addNotification('Machine Ingestion Success', 'Live AVECON test packet processed into QC Staging Gate!', 'success');
+        fetchStagedQueue();
       }
     } catch (e) {
       addNotification('Simulation notice', 'Local simulation signal recorded.', 'info');
@@ -418,17 +647,31 @@ export const MachineInterface = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center space-x-2 text-xs font-mono font-bold text-slate-700 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span className="text-emerald-800">TCP Port {hardwareStatus.port || 8080}: LISTENING</span>
+          {wsStatus === 'CONNECTED' ? (
+            <div className="flex items-center space-x-2 text-xs font-mono font-bold text-slate-700 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span className="text-emerald-800">WebSocket Live Sync: ACTIVE</span>
+            </div>
+          ) : (
+            <div className="flex items-center space-x-2 text-xs font-mono font-bold text-slate-700 bg-amber-50 px-3 py-1.5 rounded-lg border border-amber-200">
+              <span className="h-2 w-2 rounded-full bg-amber-500"></span>
+              <span className="text-amber-800">Live Sync: 3s Polling</span>
+            </div>
+          )}
+
+          <div className="flex items-center space-x-2 text-xs font-mono font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
+            <span className="h-2 w-2 rounded-full bg-sky-500"></span>
+            <span className="text-slate-700">TCP Port {hardwareStatus.port || 8080}: LISTENING</span>
           </div>
+
           <button
             type="button"
             onClick={handleSimulateAvecon}
             disabled={isSimulating}
             className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center space-x-1"
           >
-            <span>{isSimulating ? 'Processing...' : '⚡ Test AVECON (SMP-951143-1)'}</span>
+            <Zap className="h-3.5 w-3.5" />
+            <span>{isSimulating ? 'Processing...' : '⚡ Test AVECON Result'}</span>
           </button>
         </div>
       </div>
@@ -468,6 +711,380 @@ export const MachineInterface = () => {
 
       {/* Accordion List */}
       <div className="space-y-4">
+        
+        {/* ================= 0A. QC VALIDATION GATE & STAGING QUEUE ================= */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <button
+            type="button"
+            onClick={() => toggleSection('qcGate')}
+            className="w-full p-4 bg-amber-500/10 hover:bg-amber-500/15 transition-colors flex items-center justify-between font-bold text-xs text-slate-900"
+          >
+            <div className="flex items-center space-x-2">
+              <ShieldAlert className="h-4 w-4 text-amber-600" />
+              <span>QC Validation Gate & Staging Queue ({stagedQueue.filter(s => s.status === 'PENDING_REVIEW').length} Pending Verification)</span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 font-mono">
+                Panic Limit & Delta Guard
+              </span>
+            </div>
+            {openSections.qcGate ? <ChevronDown className="h-4 w-4 text-slate-600" /> : <ChevronRight className="h-4 w-4 text-slate-400" />}
+          </button>
+
+          {openSections.qcGate && (
+            <div className="p-5 border-t border-slate-200 space-y-4 animate-in fade-in duration-150">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <p>
+                  Incoming analyzer results are held in this clinical staging gate for technical review before permanent entry into patient records.
+                  Critical panic limits (e.g. Hb &lt; 7.0, WBC &gt; 30k) and historical delta shifts are automatically flagged.
+                </p>
+                <button
+                  type="button"
+                  onClick={fetchStagedQueue}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 font-bold rounded-lg border border-slate-300 text-xs flex items-center space-x-1 shrink-0"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Refresh Queue</span>
+                </button>
+              </div>
+
+              {stagedQueue.length === 0 ? (
+                <div className="text-center py-8 text-slate-400 text-xs">
+                  <CheckCircle2 className="h-8 w-8 text-emerald-500 mx-auto mb-2 opacity-60" />
+                  <p className="font-semibold">All analyzer results verified. Staging queue is clear.</p>
+                  <p className="text-[11px] text-slate-400">Incoming packets from Port 8080 or COM ports will stage here automatically.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {stagedQueue.slice(0, 8).map((item) => (
+                    <div
+                      key={item.stagedId}
+                      className={`p-4 rounded-xl border transition-all text-xs space-y-3 ${
+                        item.hasPanic
+                          ? 'bg-rose-50/50 border-rose-300'
+                          : item.hasAbnormal
+                          ? 'bg-amber-50/40 border-amber-200'
+                          : 'bg-white border-slate-200'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="font-mono font-bold text-slate-900 text-sm">{item.barcode}</span>
+                          <span className="text-slate-400">•</span>
+                          <span className="font-bold text-slate-800">{item.patientName || 'Unassigned Sample'}</span>
+                          <span className="text-[10px] text-slate-400 font-mono">({item.channel})</span>
+                        </div>
+
+                        <div className="flex items-center space-x-2">
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            {new Date(item.timestamp).toLocaleTimeString()}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                              item.status === 'COMMITTED'
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                : item.status === 'AUTO_ACCEPTED'
+                                ? 'bg-sky-100 text-sky-800 border border-sky-300'
+                                : item.status === 'REJECTED'
+                                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                : 'bg-amber-100 text-amber-800 border border-amber-300 animate-pulse'
+                            }`}
+                          >
+                            {item.status.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Delta alert banner */}
+                      {item.deltaAlerts && item.deltaAlerts.length > 0 && (
+                        <div className="bg-amber-100/70 text-amber-900 border border-amber-300 p-2 rounded-lg text-[11px] flex items-center space-x-2">
+                          <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                          <span>
+                            <strong>Delta Check Alert:</strong> Drastic shift detected compared to prior tests (
+                            {item.deltaAlerts.map(d => `${d.parameter}: ${d.percentChange}% shift`).join(', ')})
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Parameters Grid */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(item.parameters || {}).map(([param, val]) => {
+                          const evalInfo = item.evaluatedParams?.[param];
+                          const isPanic = evalInfo?.flag?.includes('CRITICAL');
+                          const isAbnormal = evalInfo?.flag === 'HIGH' || evalInfo?.flag === 'LOW';
+
+                          return (
+                            <div
+                              key={param}
+                              className={`px-2 py-1 rounded-lg border text-[11px] font-mono flex items-center space-x-1.5 ${
+                                isPanic
+                                  ? 'bg-rose-600 text-white border-rose-700 font-bold'
+                                  : isAbnormal
+                                  ? 'bg-amber-100 text-amber-900 border-amber-300 font-semibold'
+                                  : 'bg-slate-100 text-slate-800 border-slate-200'
+                              }`}
+                            >
+                              <span>{param}:</span>
+                              <span className="font-bold">{val}</span>
+                              {evalInfo?.flag === 'CRITICAL_HIGH' && <span>▲▲</span>}
+                              {evalInfo?.flag === 'CRITICAL_LOW' && <span>▼▼</span>}
+                              {evalInfo?.flag === 'HIGH' && <span>▲</span>}
+                              {evalInfo?.flag === 'LOW' && <span>▼</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Actions */}
+                      {item.status === 'PENDING_REVIEW' && (
+                        <div className="flex items-center space-x-2 pt-1 border-t border-slate-200/60">
+                          <button
+                            type="button"
+                            onClick={() => handleCommitStaged(item.stagedId)}
+                            disabled={isCommittingId === item.stagedId}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center space-x-1 cursor-pointer"
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                            <span>{isCommittingId === item.stagedId ? 'Committing...' : '✓ Approve & Commit to Patient'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRejectStaged(item.stagedId)}
+                            className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-lg text-xs font-semibold border border-rose-200 transition-all cursor-pointer flex items-center space-x-1"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                            <span>Reject Artifact</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ================= 0B. BI-DIRECTIONAL ORDER DISPATCHER ================= */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <button
+            type="button"
+            onClick={() => toggleSection('bidirectional')}
+            className="w-full p-4 bg-indigo-500/10 hover:bg-indigo-500/15 transition-colors flex items-center justify-between font-bold text-xs text-slate-900"
+          >
+            <div className="flex items-center space-x-2">
+              <ArrowRightLeft className="h-4 w-4 text-indigo-600" />
+              <span>Bi-Directional Order Dispatcher (ASTM Q / HL7 QRY Hub)</span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200 font-mono">
+                Host-Query Active
+              </span>
+            </div>
+            {openSections.bidirectional ? <ChevronDown className="h-4 w-4 text-slate-600" /> : <ChevronRight className="h-4 w-4 text-slate-400" />}
+          </button>
+
+          {openSections.bidirectional && (
+            <div className="p-5 border-t border-slate-200 space-y-4 animate-in fade-in duration-150">
+              <div className="text-xs text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <p>
+                  <strong>Bi-directional Host Query Mode:</strong> When an analyzer scans a tube barcode, it queries the LIMS (ASTM <code>Q</code> record or HL7 <code>QRY^Q02</code>).
+                  The LIMS instantly responds with the patient&apos;s booked test list (e.g. <code>^^^CBC\^^^LIPID</code>), instructing the machine what tests to perform automatically.
+                </p>
+              </div>
+
+              {/* Interactive Query Simulator Box */}
+              <div className="bg-slate-950 p-4 rounded-xl text-slate-100 space-y-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-indigo-300">Simulate Analyzer Host Query (Barcode Lookup)</span>
+                  <span className="text-[10px] font-mono text-slate-400">ASTM 1394-97 & HL7 v2.5</span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={queryBarcode}
+                    onChange={(e) => setQueryBarcode(e.target.value)}
+                    placeholder="Enter Barcode / Sample ID (e.g. SMP-951143-1)"
+                    className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSendOrderQuery}
+                    disabled={isQuerying}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center justify-center space-x-1.5 cursor-pointer shrink-0"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    <span>{isQuerying ? 'Querying...' : 'Dispatch Order to Machine'}</span>
+                  </button>
+                </div>
+
+                {lastQueryResult && (
+                  <div className="mt-3 p-3 bg-slate-900 rounded-lg border border-slate-800 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-300">
+                        Result: {lastQueryResult.found ? (
+                          <span className="text-emerald-400">✓ Order Found for {lastQueryResult.patient?.name} ({lastQueryResult.barcode})</span>
+                        ) : (
+                          <span className="text-amber-400">⚠️ No Order Found ({lastQueryResult.barcode})</span>
+                        )}
+                      </span>
+                      {lastQueryResult.testCodes && (
+                        <span className="text-[11px] font-mono bg-indigo-950 text-indigo-300 px-2 py-0.5 rounded border border-indigo-800">
+                          {lastQueryResult.testCodes}
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-400 font-mono mb-1">Raw Response Dispatched over Socket:</p>
+                      <pre className="bg-slate-950 p-2 rounded text-[10px] font-mono text-emerald-300 overflow-x-auto whitespace-pre-wrap border border-slate-800">
+                        {lastQueryResult.responsePayload}
+                      </pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Query History Log */}
+              {queryLogs.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Recent Bi-Directional Query Dispatches</h4>
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] border-b border-slate-200">
+                        <tr>
+                          <th className="px-3 py-2">Timestamp</th>
+                          <th className="px-3 py-2">Barcode</th>
+                          <th className="px-3 py-2">Patient</th>
+                          <th className="px-3 py-2">Ordered Battery</th>
+                          <th className="px-3 py-2">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {queryLogs.slice(0, 5).map((log) => (
+                          <tr key={log.queryId} className="hover:bg-slate-50/60 font-mono text-[11px]">
+                            <td className="px-3 py-1.5 text-slate-500">{new Date(log.timestamp).toLocaleTimeString()}</td>
+                            <td className="px-3 py-1.5 font-bold text-indigo-700">{log.barcode}</td>
+                            <td className="px-3 py-1.5 font-sans font-medium text-slate-800">{log.patientName}</td>
+                            <td className="px-3 py-1.5 text-slate-600">{log.tests}</td>
+                            <td className="px-3 py-1.5 text-emerald-600 font-bold">✓ DISPATCHED</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ================= 0C. RS-232 COM PORT MANAGER ================= */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <button
+            type="button"
+            onClick={() => toggleSection('serial')}
+            className="w-full p-4 bg-teal-500/10 hover:bg-teal-500/15 transition-colors flex items-center justify-between font-bold text-xs text-slate-900"
+          >
+            <div className="flex items-center space-x-2">
+              <Cable className="h-4 w-4 text-teal-600" />
+              <span>RS-232 Serial Port Driver (Physical COM Port Connectors)</span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
+                serialStatus.status === 'CONNECTED'
+                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                  : 'bg-slate-100 text-slate-700 border border-slate-200'
+              }`}>
+                {serialStatus.status}
+              </span>
+            </div>
+            {openSections.serial ? <ChevronDown className="h-4 w-4 text-slate-600" /> : <ChevronRight className="h-4 w-4 text-slate-400" />}
+          </button>
+
+          {openSections.serial && (
+            <div className="p-5 border-t border-slate-200 space-y-4 animate-in fade-in duration-150">
+              <div className="text-xs text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <p>
+                  Connect directly to analyzers using 9-pin DB9 RS-232 serial cables or USB-to-RS232 adapters (FTDI, Prolific, CH340).
+                  Incoming serial frames are automatically parsed and funneled into the LIMS QC Staging Gate.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                <div className="sm:col-span-4">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-semibold text-slate-700">Available COM Port</label>
+                    <button
+                      type="button"
+                      onClick={fetchComPorts}
+                      className="text-[10px] text-teal-600 hover:text-teal-800 font-bold flex items-center space-x-0.5"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      <span>Scan</span>
+                    </button>
+                  </div>
+                  <select
+                    value={selectedPort}
+                    onChange={(e) => setSelectedPort(e.target.value)}
+                    disabled={serialStatus.status === 'CONNECTED'}
+                    className="w-full bg-white border border-slate-300 rounded-lg p-2 font-mono font-bold text-xs"
+                  >
+                    {comPorts.length > 0 ? (
+                      comPorts.map(p => (
+                        <option key={p} value={p}>{p}</option>
+                      ))
+                    ) : (
+                      <option value="COM1">COM1 (Standard)</option>
+                    )}
+                  </select>
+                </div>
+
+                <div className="sm:col-span-4">
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Baud Rate</label>
+                  <select
+                    value={baudRate}
+                    onChange={(e) => setBaudRate(e.target.value)}
+                    disabled={serialStatus.status === 'CONNECTED'}
+                    className="w-full bg-white border border-slate-300 rounded-lg p-2 font-mono font-bold text-xs"
+                  >
+                    {[9600, 19200, 38400, 57600, 115200].map(b => (
+                      <option key={b} value={b}>{b} baud</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="sm:col-span-4">
+                  {serialStatus.status === 'CONNECTED' ? (
+                    <button
+                      type="button"
+                      onClick={handleDisconnectSerial}
+                      disabled={isSerialLoading}
+                      className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-lg text-xs transition-all shadow-xs cursor-pointer"
+                    >
+                      Disconnect {selectedPort}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleConnectSerial}
+                      disabled={isSerialLoading}
+                      className="w-full py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-lg text-xs transition-all shadow-xs cursor-pointer flex items-center justify-center space-x-1"
+                    >
+                      <Cable className="h-3.5 w-3.5" />
+                      <span>{isSerialLoading ? 'Connecting...' : `Connect ${selectedPort}`}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Status Bar */}
+              <div className="p-3 bg-slate-100 rounded-xl border border-slate-200 flex flex-wrap items-center justify-between text-xs font-mono text-slate-700 gap-2">
+                <div className="flex items-center space-x-2">
+                  <span className={`h-2.5 w-2.5 rounded-full ${serialStatus.status === 'CONNECTED' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`}></span>
+                  <span>Port: <strong>{serialStatus.port || selectedPort}</strong> ({serialStatus.baudRate || baudRate} baud)</span>
+                </div>
+                <div>
+                  <span>Total Bytes Ingested: <strong>{serialStatus.bytesRead || 0} bytes</strong></span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
         
         {/* ================= 1. MACHINE-MASTER ================= */}
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
