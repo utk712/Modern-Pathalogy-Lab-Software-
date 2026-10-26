@@ -694,6 +694,44 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // 6.2h PATIENT REPORT CLINICAL RELEASE & UNLOCK ENDPOINT (NABL / ISO 15189 QC GATE)
+    if (pathname.startsWith('/api/patients/') && pathname.endsWith('/release-report') && req.method === 'POST') {
+      const parts = pathname.split('/');
+      const patientId = decodeURIComponent(parts[3]);
+      const body = await parseJsonBody(req);
+      const db = getDb();
+      
+      let matchedPatient = null;
+      if (Array.isArray(db.patients)) {
+        matchedPatient = db.patients.find(p => p.id === patientId || p.uhid === patientId || p.barcode === patientId);
+        if (matchedPatient) {
+          matchedPatient.status = 'AUTHORIZED';
+          matchedPatient.approvedBy = body.supervisorName || 'Chief Pathologist / QC Supervisor';
+          matchedPatient.approvalTime = new Date().toISOString();
+          matchedPatient.qcVerification = {
+            verifiedBy: body.supervisorName || 'Chief Pathologist / QC Supervisor',
+            verifiedAt: new Date().toISOString(),
+            status: 'QC_VERIFIED_AND_RELEASED',
+            remarks: body.remarks || 'All clinical parameters verified against calibration controls and delta history.'
+          };
+          matchedPatient.doctorReview = {
+            authorizedBy: body.supervisorName || 'Chief Pathologist / QC Supervisor',
+            authorizedAt: new Date().toISOString(),
+            remarks: body.remarks || 'All clinical parameters verified against calibration controls and delta history.'
+          };
+          if (Array.isArray(matchedPatient.tests)) {
+            matchedPatient.tests = matchedPatient.tests.map(t => ({ ...t, status: 'AUTHORIZED' }));
+          }
+          saveDb(db);
+          broadcastLiveSync('QC_REPORT_RELEASED', { patient: matchedPatient });
+        }
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: Boolean(matchedPatient), patient: matchedPatient }));
+      return;
+    }
+
     // 6.3 HARDWARE STATUS
     if (pathname === '/api/hardware/status' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1003,14 +1041,11 @@ function handleRawHardwareData(rawText, remoteChannel, socket = null) {
 
   // 1. Check for Bi-Directional Analyzer Query (ASTM Q record or HL7 QRY/QBP)
   if (isAnalyzerQuery(rawText)) {
-    const queryOutcome = handleAnalyzerQuery(rawText, db, remoteChannel);
+    const queryOutcome = handleAnalyzerQuery(rawText, db, remoteChannel, socket);
     if (queryOutcome) {
       if (queryOutcome.logEntry) {
         saveDb(db);
         broadcastLiveSync('BIDIRECTIONAL_ORDER_DISPATCHED', queryOutcome.logEntry);
-      }
-      if (socket && queryOutcome.responsePayload) {
-        socket.write(queryOutcome.responsePayload);
       }
       return queryOutcome;
     }
@@ -1023,7 +1058,7 @@ function handleRawHardwareData(rawText, remoteChannel, socket = null) {
     tcpServerStatus.totalPacketsIngested++;
 
     // Send ACK to physical analyzer
-    if (socket) {
+    if (socket && socket.writable) {
       if (parsed.isHL7) {
         const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
         const ack = `\x0bMSH|^~\\&|LIMS|HOST|ANALYZER|AVECON|${timestamp}||ACK^R01|MSG00001|P|2.3.1\rMSA|AA|MSG00001|Success\r\x1c\r`;
@@ -1049,19 +1084,58 @@ try {
     socket.setKeepAlive(true, 10000);
     socket.setTimeout(30000);
 
-    let buffer = '';
+    let sessionBuffer = '';
+    let isASTMReceiving = false;
 
     socket.on('data', (chunk) => {
-      buffer += chunk.toString('latin1');
+      const rawChunk = chunk.toString('latin1');
       tcpServerStatus.lastPacketReceivedAt = new Date().toISOString();
 
-      const isHL7Done = buffer.includes('\x1c\r') || (buffer.includes('MSH') && buffer.includes('OBX') && buffer.endsWith('\r\n'));
-      const isASTMDone = buffer.includes('\x04') || buffer.includes('L|1') || (buffer.includes('Q|') && buffer.includes('L|'));
+      // A. ASTM Low-Level Handshake (ASTM E1381-02):
+      // Analyzer sends <ENQ> (\x05) to initiate session
+      if (rawChunk === '\x05' || rawChunk.includes('\x05')) {
+        console.log(`[TCP INTERFACE] ASTM <ENQ> session initiation received from ${clientAddr}`);
+        isASTMReceiving = true;
+        sessionBuffer = '';
+        socket.write('\x06'); // Send immediate <ACK>
+        return;
+      }
 
-      if (isHL7Done || isASTMDone || buffer.length > 8192) {
-        console.log(`[TCP INTERFACE] Complete analyzer frame captured (${buffer.length} bytes)`);
-        handleRawHardwareData(buffer, `TCP_${clientAddr}`, socket);
-        buffer = '';
+      // B. Analyzer sends individual ASTM frame (\x02 ... \r\n)
+      if (isASTMReceiving && (rawChunk.includes('\x02') || rawChunk.endsWith('\r\n'))) {
+        sessionBuffer += rawChunk;
+        socket.write('\x06'); // Send frame <ACK>
+
+        // If terminator frame arrives or buffer has complete query / EOT
+        if (rawChunk.includes('L|1') || rawChunk.includes('\x04') || rawChunk.includes('\x03')) {
+          console.log(`[TCP INTERFACE] Complete ASTM session captured from ${clientAddr}`);
+          handleRawHardwareData(sessionBuffer, `TCP_${clientAddr}`, socket);
+          sessionBuffer = '';
+          isASTMReceiving = false;
+        }
+        return;
+      }
+
+      // C. Analyzer sends <EOT> (\x04)
+      if (rawChunk.includes('\x04')) {
+        console.log(`[TCP INTERFACE] ASTM <EOT> received from ${clientAddr}`);
+        if (sessionBuffer.length > 0) {
+          handleRawHardwareData(sessionBuffer, `TCP_${clientAddr}`, socket);
+          sessionBuffer = '';
+        }
+        isASTMReceiving = false;
+        return;
+      }
+
+      // D. HL7 MLLP Frame (\x0b ... \x1c\r) or generic bulk text
+      sessionBuffer += rawChunk;
+      const isHL7Done = sessionBuffer.includes('\x1c\r') || (sessionBuffer.includes('MSH') && sessionBuffer.endsWith('\r\n'));
+      const isASTMDone = sessionBuffer.includes('\x04') || sessionBuffer.includes('L|1');
+
+      if (isHL7Done || isASTMDone || sessionBuffer.length > 8192) {
+        console.log(`[TCP INTERFACE] Complete frame captured (${sessionBuffer.length} bytes) from ${clientAddr}`);
+        handleRawHardwareData(sessionBuffer, `TCP_${clientAddr}`, socket);
+        sessionBuffer = '';
       }
     });
 

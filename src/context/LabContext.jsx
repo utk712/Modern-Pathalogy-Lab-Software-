@@ -791,22 +791,41 @@ export const LabProvider = ({ children }) => {
   };
 
   const authorizeReport = (patientId, doctorName = labProfile?.pathologistName || 'Consultant Pathologist', remarks = '') => {
-    setPatients(prev => (Array.isArray(prev) ? prev : []).map(patient => {
-      if (patient.id !== patientId) return patient;
-      return {
-        ...patient,
-        status: 'AUTHORIZED',
-        approvedBy: doctorName,
-        approvalTime: new Date().toISOString(),
-        doctorReview: {
-          authorizedBy: doctorName,
-          authorizedAt: new Date().toISOString(),
-          remarks: remarks || 'All evaluated parameters within normal biological reference intervals.'
-        }
-      };
-    }));
+    let releasedPatient = null;
+    setPatients(prev => {
+      const updatedList = (Array.isArray(prev) ? prev : []).map(patient => {
+        if (patient.id !== patientId && patient.uhid !== patientId) return patient;
+        releasedPatient = {
+          ...patient,
+          status: 'AUTHORIZED',
+          approvedBy: doctorName,
+          approvalTime: new Date().toISOString(),
+          qcVerification: {
+            status: 'QC_VERIFIED_AND_RELEASED',
+            verifiedBy: doctorName,
+            verifiedAt: new Date().toISOString(),
+            remarks: remarks || 'All evaluated parameters clinically verified & released under NABL / ISO 15189 protocol.'
+          },
+          doctorReview: {
+            authorizedBy: doctorName,
+            authorizedAt: new Date().toISOString(),
+            remarks: remarks || 'All evaluated parameters clinically verified & released under NABL / ISO 15189 protocol.'
+          }
+        };
+        return releasedPatient;
+      });
+      localStorage.setItem('pulselab_patients', JSON.stringify(updatedList));
+      return updatedList;
+    });
 
-    addNotification('Report Clinically Authorized', `Report signed and digitally verified by ${doctorName}`, 'success');
+    // Sync to backend release API
+    fetch(`${API_BASE_URL}/patients/${encodeURIComponent(patientId)}/release-report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ supervisorName: doctorName, remarks })
+    }).catch(() => {});
+
+    addNotification('Report QC Verified & Released', `Diagnostic report clinically authorized and unlocked by ${doctorName}`, 'success');
   };
 
   const batchAuthorize = (patientIds = [], doctorName = labProfile?.pathologistName || 'Consultant Pathologist') => {

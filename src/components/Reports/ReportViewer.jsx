@@ -12,11 +12,18 @@ import {
   Check,
   Award,
   ChevronDown,
-  Sliders
+  Sliders,
+  Lock,
+  ShieldAlert,
+  ShieldCheck,
+  CheckCircle2,
+  AlertTriangle,
+  X
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
+import confetti from 'canvas-confetti';
 
 const CBC_STRUCTURED_DATA = {
   testTitle: 'Complete Blood Count',
@@ -94,12 +101,28 @@ const DEMO_FALLBACK_PATIENT = {
 };
 
 export const ReportViewer = () => {
-  const { patients, tests: masterTests, selectedPatientId, setSelectedPatientId, reportDesign, addNotification, setActiveTab } = useLab();
+  const {
+    patients,
+    tests: masterTests,
+    selectedPatientId,
+    setSelectedPatientId,
+    reportDesign,
+    addNotification,
+    setActiveTab,
+    authorizeReport,
+    labProfile
+  } = useLab();
+
   const [searchQuery, setSearchQuery] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareChannel, setShareChannel] = useState('whatsapp');
   const [activePageIndex, setActivePageIndex] = useState('all');
+
+  // Requirement 5: Technical QC Validation Gate Modal State
+  const [showQCModal, setShowQCModal] = useState(false);
+  const [supervisorName, setSupervisorName] = useState(labProfile?.pathologistName || 'Dr. Pallavi Gedam');
+  const [qcRemarks, setQcRemarks] = useState('All evaluated clinical parameters verified against calibration controls and delta history.');
 
   const reportContainerRef = useRef(null);
 
@@ -110,6 +133,20 @@ export const ReportViewer = () => {
     }
     return DEMO_FALLBACK_PATIENT;
   }, [patients, selectedPatientId]);
+
+  // Requirement 5: QC Gate Enforcement - Diagnostic reports MUST be released by supervisor before PDF/print
+  const isReportReleased = activePatient.status === 'AUTHORIZED' || activePatient.status === 'RELEASED';
+
+  const handleReleaseReport = (e) => {
+    if (e) e.preventDefault();
+    if (!activePatient) return;
+    authorizeReport(activePatient.id, supervisorName, qcRemarks);
+    setShowQCModal(false);
+    try {
+      confetti({ particleCount: 75, spread: 65, origin: { y: 0.7 } });
+    } catch (err) {}
+    addNotification('QC Gate Approved & Released', 'Report unlocked! NABL/ISO 15189 diagnostic PDF generation is now active.', 'success');
+  };
 
   const filteredList = useMemo(() => {
     if (!patients || patients.length === 0) return [DEMO_FALLBACK_PATIENT];
@@ -235,10 +272,20 @@ export const ReportViewer = () => {
   };
 
   const handlePrint = () => {
+    if (!isReportReleased) {
+      setShowQCModal(true);
+      addNotification('QC Gate Locked', 'Supervisor verification required before printing final report.', 'warning');
+      return;
+    }
     window.print();
   };
 
   const handleDownloadPDF = async () => {
+    if (!isReportReleased) {
+      setShowQCModal(true);
+      addNotification('QC Gate Locked', 'Supervisor verification required before generating final NABL/ISO PDF.', 'warning');
+      return;
+    }
     if (!reportContainerRef.current) return;
     setIsExporting(true);
     try {
@@ -323,19 +370,33 @@ export const ReportViewer = () => {
 
           <button
             onClick={handlePrint}
-            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-xl flex items-center space-x-1.5"
+            className={`px-3 py-2 font-bold rounded-xl flex items-center space-x-1.5 transition-all cursor-pointer ${
+              !isReportReleased
+                ? 'bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-800'
+            }`}
+            title={!isReportReleased ? 'Locked: Human Supervisor QC Verification Required' : 'Print Report'}
           >
-            <Printer className="h-4 w-4" />
+            {!isReportReleased ? <Lock className="h-4 w-4 text-amber-700" /> : <Printer className="h-4 w-4" />}
             <span>Print</span>
           </button>
 
           <button
             onClick={handleDownloadPDF}
             disabled={isExporting}
-            className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-md flex items-center space-x-1.5"
+            className={`px-4 py-2 font-bold rounded-xl shadow-md flex items-center space-x-1.5 transition-all cursor-pointer ${
+              !isReportReleased
+                ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-200 ring-2 ring-amber-400'
+                : 'bg-slate-900 hover:bg-slate-800 text-white'
+            }`}
+            title={!isReportReleased ? 'Locked: Human Supervisor QC Verification Required' : 'Download PDF'}
           >
-            <Download className={`h-4 w-4 ${isExporting ? 'animate-bounce' : ''}`} />
-            <span>{isExporting ? 'Generating PDF...' : 'Download PDF'}</span>
+            {!isReportReleased ? (
+              <Lock className="h-4 w-4" />
+            ) : (
+              <Download className={`h-4 w-4 ${isExporting ? 'animate-bounce' : ''}`} />
+            )}
+            <span>{isExporting ? 'Generating PDF...' : !isReportReleased ? '🔒 Locked (QC Approval Required)' : 'Download PDF'}</span>
           </button>
         </div>
       </div>
@@ -366,6 +427,7 @@ export const ReportViewer = () => {
           <div className="space-y-2 max-h-[calc(100vh-22rem)] overflow-y-auto pr-1">
             {filteredList.map(p => {
               const isSelected = p.id === activePatient?.id;
+              const pReleased = p.status === 'AUTHORIZED' || p.status === 'RELEASED';
               return (
                 <div
                   key={p.id}
@@ -382,9 +444,20 @@ export const ReportViewer = () => {
                       Lab Code: {p.labCode || (p.uhid ? String(p.uhid).replace('UHID-', '1608260') : '1608260')}
                     </p>
                   </div>
-                  <span className="text-[10px] font-bold text-slate-700 bg-white px-2 py-0.5 rounded border border-slate-200">
-                    {(p.tests || []).length} Page{(p.tests || []).length > 1 ? 's' : ''}
-                  </span>
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="text-[10px] font-bold text-slate-700 bg-white px-2 py-0.5 rounded border border-slate-200">
+                      {(p.tests || []).length} Page{(p.tests || []).length > 1 ? 's' : ''}
+                    </span>
+                    {pReleased ? (
+                      <span className="text-[9px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
+                        Authorized
+                      </span>
+                    ) : (
+                      <span className="text-[9px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded font-mono">
+                        Pending Review
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -392,7 +465,52 @@ export const ReportViewer = () => {
         </div>
 
         {/* Right 8 Cols: Dynamically Styled Report Canvas */}
-        <div className="lg:col-span-8 space-y-6">
+        <div className="lg:col-span-8 space-y-4">
+          
+          {/* Requirement 5: QC Validation Gate Enforcement Banner */}
+          {!isReportReleased ? (
+            <div className="bg-amber-500/10 border-2 border-amber-400 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs no-print">
+              <div className="flex items-start space-x-3">
+                <div className="h-10 w-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-200">
+                  <ShieldAlert className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="font-extrabold text-amber-950 text-sm">
+                      QC Validation Gate: Technical Verification Required
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-200 text-amber-900 font-mono uppercase tracking-wider">
+                      Pending Review
+                    </span>
+                  </div>
+                  <p className="text-xs text-amber-800 mt-0.5">
+                    NABL (ISO 15189:2022) compliance mandates that machine results must be verified by a human laboratory supervisor before generating diagnostic PDFs. <strong>PDF generation and printing are currently locked.</strong>
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowQCModal(true)}
+                className="px-4 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-amber-300 flex items-center justify-center space-x-1.5 shrink-0 cursor-pointer animate-pulse"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                <span>Approve & Release Report</span>
+              </button>
+            </div>
+          ) : (
+            <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-2xl flex items-center justify-between gap-3 no-print">
+              <div className="flex items-center space-x-2.5">
+                <ShieldCheck className="h-5 w-5 text-emerald-600 shrink-0" />
+                <span className="text-xs font-bold text-emerald-900">
+                  ✓ NABL / ISO 15189 QC Gate Verified & Clinically Released by {activePatient.approvedBy || activePatient.doctorReview?.authorizedBy || supervisorName}
+                </span>
+              </div>
+              <span className="text-[10px] font-mono text-emerald-700 bg-emerald-100/60 px-2 py-0.5 rounded border border-emerald-200 font-bold">
+                PDF UNLOCKED
+              </span>
+            </div>
+          )}
           
           <div className="flex items-center justify-between bg-white p-3 rounded-2xl border border-slate-200 shadow-sm no-print">
             <div className="flex items-center space-x-2 text-xs font-bold">
@@ -706,6 +824,107 @@ export const ReportViewer = () => {
                 <span>Send PDF Link</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Requirement 5: Technical QC Verification & Release Modal */}
+      {showQCModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 no-print">
+          <div className="bg-white rounded-2xl max-w-xl w-full shadow-2xl p-6 border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-3 text-amber-600">
+                <ShieldAlert className="h-6 w-6" />
+                <div>
+                  <h3 className="font-bold text-base text-slate-900">QC Validation Gate: Technical Release</h3>
+                  <p className="text-[11px] text-slate-500 font-mono">NABL / ISO 15189:2022 Mandated Verification</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowQCModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Patient Snapshot */}
+            <div className="bg-amber-50/70 border border-amber-200 p-3 rounded-xl flex items-center justify-between text-xs">
+              <div>
+                <p className="font-bold text-slate-900">{activePatient.name}</p>
+                <p className="text-[11px] text-slate-500 font-mono">UHID: {activePatient.uhid} • Age: {activePatient.age} ({activePatient.gender})</p>
+              </div>
+              <span className="px-2 py-1 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 font-mono">
+                {activePatient.barcode || 'SMP-ONLINE'}
+              </span>
+            </div>
+
+            {/* Parameter Review Preview */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                <span>Evaluated Machine Parameters</span>
+                <span className="text-[10px] text-slate-400 font-mono">Status: Pending Review</span>
+              </div>
+              <div className="max-h-44 overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100 text-xs">
+                {Object.entries(activePatient.results || {}).length > 0 ? (
+                  Object.entries(activePatient.results).map(([k, v]) => (
+                    <div key={k} className="p-2 flex items-center justify-between">
+                      <span className="font-medium text-slate-700">{k}</span>
+                      <span className="font-mono font-bold text-slate-900 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">{String(v)}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="p-3 text-center text-slate-400 text-xs font-mono">
+                    Results recorded in patient profile
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Supervisor Form */}
+            <form onSubmit={handleReleaseReport} className="space-y-3 pt-2">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Releasing Supervisor / Pathologist Name
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={supervisorName}
+                  onChange={(e) => setSupervisorName(e.target.value)}
+                  className="w-full text-xs font-semibold p-2 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Clinical QC Verification Remarks
+                </label>
+                <textarea
+                  rows={2}
+                  value={qcRemarks}
+                  onChange={(e) => setQcRemarks(e.target.value)}
+                  className="w-full text-xs p-2 bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                />
+              </div>
+
+              <div className="flex space-x-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowQCModal(false)}
+                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-2 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-md shadow-emerald-200 flex items-center justify-center space-x-2 cursor-pointer transition-all"
+                >
+                  <Award className="h-4 w-4" />
+                  <span>Approve & Unlock PDF Report</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

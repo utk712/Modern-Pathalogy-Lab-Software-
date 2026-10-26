@@ -239,6 +239,11 @@ export const LabWorklist = () => {
                         Dr Review
                       </span>
                     )}
+                    {(p.status === 'Pending Review' || p.status === 'Results Entered' || p.status === 'HELD_IN_QC_GATE') && (
+                      <span className="text-[10px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded animate-pulse font-mono">
+                        QC Pending
+                      </span>
+                    )}
                     {p.status === 'IN_TESTING' && (
                       <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
                         In Testing

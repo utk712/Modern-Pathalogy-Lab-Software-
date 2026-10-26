@@ -1,5 +1,6 @@
 // =========================================================================
-// server/bidirectional_controller.js - ASTM 1394-97 & HL7 v2.5 Bi-Directional Query Engine
+// server/bidirectional_controller.js - ASTM 1381/1394 & HL7 v2.5 Bi-Directional Controller
+// Full Outbound Reverse Query Handler (Transmits Patient Test Orders Down the Wire)
 // =========================================================================
 
 /**
@@ -41,8 +42,28 @@ function formatTestCodes(tests) {
     codes.push(mapped || `^^^${name.toUpperCase().replace(/[^A-Z0-9]/g, '_').substring(0, 10)}`);
   }
 
-  // Deduplicate and join with repetition separator \
   return Array.from(new Set(codes)).join('\\');
+}
+
+/**
+ * Calculates official ASTM E1381 modulo 256 frame checksum.
+ */
+function calculateASTMChecksum(frameContent) {
+  let sum = 0;
+  for (let i = 0; i < frameContent.length; i++) {
+    sum = (sum + frameContent.charCodeAt(i)) % 256;
+  }
+  return sum.toString(16).toUpperCase().padStart(2, '0');
+}
+
+/**
+ * Creates an ASTM E1381 compliant frame with <STX>, frame number, content, <ETX>, checksum, and <CR><LF>.
+ */
+function makeASTMFrame(frameNum, text, isLast = true) {
+  const endChar = isLast ? '\x03' : '\x17'; // ETX or ETB
+  const payload = `${frameNum % 8}${text}${endChar}`;
+  const checksum = calculateASTMChecksum(payload);
+  return `\x02${payload}${checksum}\r\n`;
 }
 
 /**
@@ -50,7 +71,7 @@ function formatTestCodes(tests) {
  */
 function isAnalyzerQuery(rawText) {
   if (!rawText) return false;
-  const isASTMQuery = /[\r\n]Q\|/.test(rawText) || rawText.startsWith('Q|');
+  const isASTMQuery = /[\r\n]Q\|/.test(rawText) || rawText.startsWith('Q|') || rawText.includes('Q|1|');
   const isHL7Query = rawText.includes('QRY^') || rawText.includes('QBP^') || rawText.includes('|Q02|') || rawText.includes('|Q11|');
   return isASTMQuery || isHL7Query;
 }
@@ -63,15 +84,25 @@ function extractQueryBarcode(rawText) {
   const clean = rawText.replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, '');
   const lines = clean.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
 
-  for (const line of lines) {
-    // ASTM Q record: Q|1|^SMP-12345||ALL...
-    if (line.startsWith('Q|')) {
+  for (let line of lines) {
+    // Strip leading frame sequence number if present (e.g. "2Q|1|..." -> "Q|1|...")
+    line = line.replace(/^\d+/, '');
+
+    if (line.startsWith('Q|') || line.includes('|Q|')) {
       const parts = line.split('|');
-      const rawBarcode = parts[2] || '';
+      const qIdx = parts[0] === 'Q' ? 0 : parts.indexOf('Q');
+      const rawBarcode = parts[qIdx + 2] || parts[qIdx + 1] || '';
       const token = rawBarcode.replace(/^\^+/, '').split('^')[0].trim();
+      if (token && token.toUpperCase() !== 'ALL') return token;
+
+      for (let i = 1; i < parts.length; i++) {
+        const candidate = parts[i].replace(/^\^+/, '').split('^')[0].trim();
+        if (candidate && candidate.toUpperCase() !== 'ALL' && candidate.length > 2) {
+          return candidate;
+        }
+      }
       if (token) return token;
     }
-    // HL7 QRD / QPD segment
     if (line.startsWith('QRD|') || line.startsWith('QPD|')) {
       const parts = line.split('|');
       for (const p of parts) {
@@ -85,18 +116,108 @@ function extractQueryBarcode(rawText) {
 }
 
 /**
+ * Builds ASTM E1394-97 order download frames.
+ */
+function buildASTMOrderFrames(patient, barcode) {
+  const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
+  const safeName = (patient?.name || 'PATIENT').replace(/\s+/g, '^');
+  const gender = (patient?.gender || '').toLowerCase().startsWith('f') ? 'F' : 'M';
+  const uhid = patient?.uhid || patient?.id || 'UHID-001';
+  const testListString = formatTestCodes(patient?.tests || patient?.selectedTests || []);
+
+  const header = `H|\\^&|||LIMS_HOST|||||||P|1|${timestamp}`;
+  const pRecord = `P|1||${uhid}||${safeName}|||${gender}|||||${patient?.referringDoctor || 'DIRECT'}`;
+  const oRecord = `O|1|${barcode || uhid}||${testListString}|R|${timestamp}|||||A||||||||||||||Q`;
+  const lRecord = `L|1|N`;
+
+  const frames = [
+    makeASTMFrame(1, header, true),
+    makeASTMFrame(2, pRecord, true),
+    makeASTMFrame(3, oRecord, true),
+    makeASTMFrame(4, lRecord, true)
+  ];
+
+  return {
+    rawRecords: [header, pRecord, oRecord, lRecord].join('\r\n'),
+    frames,
+    testCodes: testListString
+  };
+}
+
+/**
+ * Builds HL7 v2.3.1 / v2.5 DSR^Q03 outbound order response frame.
+ */
+function buildHL7OrderMessage(patient, barcode, originalMsgId = 'MSG001') {
+  const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
+  const safeName = (patient?.name || 'PATIENT').replace(/\s+/g, '^');
+  const gender = (patient?.gender || '').toLowerCase().startsWith('f') ? 'F' : 'M';
+  const uhid = patient?.uhid || patient?.id || 'UHID-001';
+  const testListString = formatTestCodes(patient?.tests || patient?.selectedTests || []);
+  const respMsgId = `RESP${Date.now()}`;
+
+  const segments = [
+    `MSH|^~\\&|LIMS|HOST|ANALYZER|LAB|${timestamp}||DSR^Q03|${respMsgId}|P|2.3.1`,
+    `MSA|AA|${originalMsgId}|Patient Order Found and Dispatched`,
+    `QAK|SR|OK`,
+    `PID|1||${uhid}||${safeName}|||${gender}`,
+    `OBR|1|${barcode || uhid}||${testListString}|||${timestamp}|||||||||||||||||O`
+  ];
+
+  const mllpFrame = `\x0b${segments.join('\r')}\x1c\r`;
+  return {
+    rawSegments: segments.join('\r'),
+    mllpFrame,
+    testCodes: testListString
+  };
+}
+
+/**
+ * Core reverse query dispatcher: Transmits outbound test orders down the wire to the analyzer socket.
+ */
+function dispatchOutboundOrderDownTheWire(socket, patient, barcode, isHL7 = false, originalMsgId = 'MSG001') {
+  if (!socket || !socket.writable) {
+    console.warn('[BI-DIRECTIONAL CONTROLLER] Socket not writable for outbound dispatch');
+    return false;
+  }
+
+  if (isHL7) {
+    // HL7 Outbound Transmission over MLLP
+    const { mllpFrame, testCodes } = buildHL7OrderMessage(patient, barcode, originalMsgId);
+    socket.write(mllpFrame);
+    console.log(`[BI-DIRECTIONAL CONTROLLER] -> Outbound HL7 DSR^Q03 dispatched for ${barcode} (${testCodes}) down the wire!`);
+    return true;
+  }
+
+  // ASTM Outbound Transmission (ASTM E1381 / E1394 session)
+  const { frames, rawRecords, testCodes } = buildASTMOrderFrames(patient, barcode);
+  
+  // Transmit ENQ session header
+  socket.write('\x05');
+
+  // Transmit frames down the wire
+  setTimeout(() => {
+    for (const frame of frames) {
+      socket.write(frame);
+    }
+    // Final EOT to close outbound transmission
+    socket.write('\x04');
+    console.log(`[BI-DIRECTIONAL CONTROLLER] -> Outbound ASTM Orders dispatched for ${barcode} (${testCodes}) down the wire!`);
+  }, 100);
+
+  return true;
+}
+
+/**
  * Handles incoming query packet, looks up patient, and builds Order download response.
  */
-function handleAnalyzerQuery(rawText, db, remoteChannel = 'TCP') {
+function handleAnalyzerQuery(rawText, db, remoteChannel = 'TCP', socket = null) {
   if (!isAnalyzerQuery(rawText)) return null;
 
   const barcode = extractQueryBarcode(rawText);
-  const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
   const isHL7 = rawText.includes('MSH');
 
   console.log(`[BI-DIRECTIONAL CONTROLLER] Analyzer query received from ${remoteChannel} for Barcode: ${barcode || 'ALL'}`);
 
-  // Find patient in database
   let matchedPatient = null;
   if (barcode && Array.isArray(db.patients)) {
     const target = barcode.toLowerCase().trim();
@@ -119,34 +240,20 @@ function handleAnalyzerQuery(rawText, db, remoteChannel = 'TCP') {
 
   // Case 1: Patient Found with Valid Orders
   if (matchedPatient) {
-    const patientTests = matchedPatient.tests || matchedPatient.selectedTests || [];
-    const testListString = formatTestCodes(patientTests);
-    const safeName = (matchedPatient.name || 'PATIENT').replace(/\s+/g, '^');
-    const gender = (matchedPatient.gender || '').toLowerCase().startsWith('f') ? 'F' : 'M';
-    const uhid = matchedPatient.uhid || matchedPatient.id || 'UHID-001';
-
+    const testListString = formatTestCodes(matchedPatient.tests || matchedPatient.selectedTests || []);
     let responsePayload;
+
     if (isHL7) {
-      // HL7 v2.3.1 / v2.5 DSR^Q03 Response Frame
-      const msgId = `MSG${Date.now()}`;
-      responsePayload = [
-        `\x0bMSH|^~\\&|LIMS|HOST|ANALYZER|LAB|${timestamp}||DSR^Q03|${msgId}|P|2.3.1`,
-        `MSA|AA|${msgId}|Query Order Processed Successfully`,
-        `QAK|SR|OK`,
-        `PID|1||${uhid}||${safeName}|||${gender}`,
-        `OBR|1|${barcode || uhid}||${testListString}|||${timestamp}|||||||||||||||||O`,
-        `\x1c\r`
-      ].join('\r');
+      const hl7Data = buildHL7OrderMessage(matchedPatient, barcode);
+      responsePayload = hl7Data.mllpFrame;
     } else {
-      // ASTM E1394-97 Bi-directional Order Frame
-      responsePayload = [
-        `\x05`, // ENQ handshake init if needed
-        `H|\\^&|||LIMS_HOST|||||||P|1|${timestamp}`,
-        `P|1||${uhid}||${safeName}|||${gender}|||||${matchedPatient.referringDoctor || 'DIRECT'}`,
-        `O|1|${barcode || uhid}||${testListString}|R|${timestamp}|||||A||||||||||||||Q`,
-        `L|1|N`,
-        `\x04` // EOT
-      ].join('\r\n');
+      const astmData = buildASTMOrderFrames(matchedPatient, barcode);
+      responsePayload = `\x05` + astmData.frames.join('') + `\x04`;
+    }
+
+    // Transmit down the physical wire if socket provided
+    if (socket) {
+      dispatchOutboundOrderDownTheWire(socket, matchedPatient, barcode, isHL7);
     }
 
     const logEntry = {
@@ -154,7 +261,7 @@ function handleAnalyzerQuery(rawText, db, remoteChannel = 'TCP') {
       timestamp: new Date().toISOString(),
       channel: remoteChannel,
       barcode,
-      status: 'ORDER_DISPATCHED',
+      status: 'ORDER_DISPATCHED_DOWN_THE_WIRE',
       patientId: matchedPatient.id,
       patientName: matchedPatient.name,
       tests: testListString
@@ -179,20 +286,18 @@ function handleAnalyzerQuery(rawText, db, remoteChannel = 'TCP') {
   let cancelResponse;
   if (isHL7) {
     const msgId = `MSG${Date.now()}`;
-    cancelResponse = [
-      `\x0bMSH|^~\\&|LIMS|HOST|ANALYZER|LAB|${timestamp}||DSR^Q03|${msgId}|P|2.3.1`,
-      `MSA|AE|${msgId}|Specimen barcode not found in active worklist`,
-      `QAK|NF|NF`,
-      `\x1c\r`
-    ].join('\r');
+    const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
+    cancelResponse = `\x0bMSH|^~\\&|LIMS|HOST|ANALYZER|LAB|${timestamp}||DSR^Q03|${msgId}|P|2.3.1\rMSA|AE|${msgId}|Specimen barcode not found in active worklist\rQAK|NF|NF\r\x1c\r`;
   } else {
-    // ASTM Q with Termination 'X' (Request cannot be done)
-    cancelResponse = [
-      `H|\\^&|||LIMS_HOST|||||||P|1|${timestamp}`,
-      `Q|1|^${barcode || 'UNKNOWN'}||ALL||||||||X`,
-      `L|1|N`,
-      `\x04`
-    ].join('\r\n');
+    const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').substring(0, 14);
+    const hFrame = makeASTMFrame(1, `H|\\^&|||LIMS_HOST|||||||P|1|${timestamp}`);
+    const qFrame = makeASTMFrame(2, `Q|1|^${barcode || 'UNKNOWN'}||ALL||||||||X`);
+    const lFrame = makeASTMFrame(3, `L|1|N`);
+    cancelResponse = `\x05${hFrame}${qFrame}${lFrame}\x04`;
+  }
+
+  if (socket && socket.writable) {
+    socket.write(cancelResponse);
   }
 
   return {
@@ -208,5 +313,10 @@ module.exports = {
   isAnalyzerQuery,
   extractQueryBarcode,
   handleAnalyzerQuery,
-  formatTestCodes
+  formatTestCodes,
+  makeASTMFrame,
+  calculateASTMChecksum,
+  buildASTMOrderFrames,
+  buildHL7OrderMessage,
+  dispatchOutboundOrderDownTheWire
 };
