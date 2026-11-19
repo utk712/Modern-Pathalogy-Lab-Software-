@@ -12,7 +12,6 @@ import {
   ChevronRight,
   ShieldCheck
 } from 'lucide-react';
-import { VendorMasterSetupModal } from './VendorMasterSetupModal';
 
 import { verifyLicenseOnCloud } from '../../config/firebase';
 
@@ -24,31 +23,6 @@ export const LicenseActivationScreen = () => {
   const [errorMsg, setErrorMsg] = useState(licenseInfo?.error || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successInfo, setSuccessInfo] = useState(null);
-  const [showVendorModal, setShowVendorModal] = useState(false);
-
-  // Keyboard shortcut Ctrl + Shift + V for Technician Master Setup
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
-        e.preventDefault();
-        setShowVendorModal(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  const handleConfigApplied = (config) => {
-    if (config.labName) setLabName(config.labName);
-    if (config.securityKey) {
-      setLicenseKey(config.securityKey);
-      const res = activateLicense(config.labName || labName || 'Diagnostic Lab', config.securityKey);
-      if (res.success) {
-        setSuccessInfo(res);
-      }
-    }
-    setShowVendorModal(false);
-  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -83,18 +57,6 @@ export const LicenseActivationScreen = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 flex items-center justify-center p-4 sm:p-6 text-slate-100 font-sans selection:bg-sky-500 selection:text-white relative">
       
-      {/* Top Right Vendor Button */}
-      <div className="absolute top-4 right-4 z-20">
-        <button
-          type="button"
-          onClick={() => setShowVendorModal(true)}
-          className="flex items-center space-x-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
-        >
-          <Lock className="h-3.5 w-3.5 text-amber-400" />
-          <span>👑 Vendor Master Setup</span>
-        </button>
-      </div>
-
       {/* Background Glow Decorations */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
         <div className="absolute -top-40 -left-40 w-96 h-96 bg-rose-500/10 rounded-full blur-3xl"></div>
@@ -201,13 +163,7 @@ export const LicenseActivationScreen = () => {
 
         {/* Footer Notes */}
         <div className="pt-4 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-500">
-          <button
-            type="button"
-            onClick={() => setShowVendorModal(true)}
-            className="text-[11px] text-amber-400 hover:text-amber-300 font-bold underline cursor-pointer"
-          >
-            Technician Setup (Ctrl + Shift + V)
-          </button>
+          <span>PulseLab Medical Diagnostic Systems</span>
           <div className="flex items-center space-x-1.5 text-emerald-400 font-semibold">
             <ShieldCheck className="h-4 w-4" />
             <span>Cryptographic Engine</span>
@@ -215,13 +171,6 @@ export const LicenseActivationScreen = () => {
         </div>
 
       </div>
-
-      {/* Vendor Master Setup Modal */}
-      <VendorMasterSetupModal
-        isOpen={showVendorModal}
-        onClose={() => setShowVendorModal(false)}
-        onConfigApplied={handleConfigApplied}
-      />
 
     </div>
   );

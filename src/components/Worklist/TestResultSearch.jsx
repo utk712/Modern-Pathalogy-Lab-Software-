@@ -20,8 +20,19 @@ import {
   User,
   Activity,
   Layers,
-  ArrowUpDown
+  ArrowUpDown,
+  AlertOctagon,
+  Calculator,
+  PhoneCall,
+  ShieldAlert,
+  BellRing,
+  X
 } from 'lucide-react';
+import {
+  resolveClientReferenceRange,
+  evaluateClientResultValue
+} from '../../utils/referenceRangeResolver';
+import { applyAutoCalculations } from '../../utils/clinicalFormulas';
 
 const TEST_COLOR_MAP = {
   TEST_CBC: 'bg-rose-500 text-white',
@@ -44,7 +55,8 @@ export const TestResultSearch = () => {
     authorizeReport,
     addNotification,
     setSelectedPatientId,
-    setActiveTab
+    setActiveTab,
+    currentUser
   } = useLab();
 
   // Search Filters
@@ -72,6 +84,15 @@ export const TestResultSearch = () => {
   const [activePatientModal, setActivePatientModal] = useState(null);
   const [modalResults, setModalResults] = useState({});
   const [modalRemarks, setModalRemarks] = useState('');
+  const [formulaWarnings, setFormulaWarnings] = useState([]);
+
+  // Blocking Critical / Panic Alert Notification Modal State (NABL / ISO 15189 Requirement)
+  const [pendingPanicModal, setPendingPanicModal] = useState(null);
+  const [panicClinicianNotified, setPanicClinicianNotified] = useState('');
+  const [panicNotificationMethod, setPanicNotificationMethod] = useState('Immediate Phone Call');
+  const [panicNotifiedBy, setPanicNotifiedBy] = useState('');
+  const [panicRemarks, setPanicRemarks] = useState('');
+  const [acknowledgedPanicsForSession, setAcknowledgedPanicsForSession] = useState({});
 
   // Custom Parameter Addition state
   const [showAddCustomParam, setShowAddCustomParam] = useState(false);
@@ -152,7 +173,10 @@ export const TestResultSearch = () => {
 
   const handleOpenResultModal = (patient) => {
     setActivePatientModal(patient);
-    setModalResults(patient.results || {});
+    const initialRaw = patient.results || {};
+    const { updated, warnings } = applyAutoCalculations(initialRaw, patient);
+    setModalResults(updated);
+    setFormulaWarnings(warnings || []);
     setModalRemarks(patient.doctorReview?.remarks || '');
     setCustomParamsList(patient.customParameters || []);
     setShowAddCustomParam(false);
@@ -160,6 +184,64 @@ export const TestResultSearch = () => {
     setNewParamVal('');
     setNewParamUnit('g/dL');
     setNewParamRef('');
+  };
+
+  const handleParamInputChange = (paramKey, newVal) => {
+    const nextRaw = { ...modalResults, [paramKey]: newVal };
+    const { updated, warnings } = applyAutoCalculations(nextRaw, activePatientModal || {});
+    setModalResults(updated);
+    setFormulaWarnings(warnings || []);
+  };
+
+  const scanForCriticalPanicItems = (resultsToCheck, patient) => {
+    if (!patient) return [];
+    const orderedTests = Array.isArray(patient.tests) ? patient.tests : [];
+    const criticals = [];
+
+    orderedTests.forEach(tItem => {
+      let testObj = null;
+      if (typeof tItem === 'string') {
+        testObj = tests.find(x => x.id === tItem || x.code === tItem || x.name?.toLowerCase() === tItem.toLowerCase());
+      } else if (typeof tItem === 'object' && tItem !== null) {
+        testObj = tests.find(x => x.id === tItem.id || x.code === tItem.code || x.name === tItem.name) || tItem;
+      }
+      if (!testObj) return;
+
+      (testObj.parameters || []).forEach((param, pIdx) => {
+        const pKey = param.id || `${testObj.id}_p_${pIdx}`;
+        const val = resultsToCheck[pKey] ?? resultsToCheck[param.name];
+        if (val !== undefined && val !== null && String(val).trim() !== '') {
+          const resolvedRange = resolveClientReferenceRange({
+            paramKey: pKey,
+            paramName: param.name,
+            gender: patient.gender,
+            age: patient.age,
+            ageType: patient.ageType
+          });
+          const evaluation = evaluateClientResultValue(val, resolvedRange || {
+            normalLow: param.min,
+            normalHigh: param.max
+          });
+
+          if (evaluation.isPanic) {
+            criticals.push({
+              paramKey: pKey,
+              paramName: param.name,
+              val,
+              unit: param.unit || resolvedRange?.unit || '',
+              flag: evaluation.flag,
+              panicType: evaluation.panicType,
+              panicThreshold: evaluation.panicType === 'PANIC_HIGH'
+                ? (resolvedRange?.panicHigh || resolvedRange?.panic_high)
+                : (resolvedRange?.panicLow || resolvedRange?.panic_low),
+              refText: resolvedRange?.displayText || `${param.min} - ${param.max}`
+            });
+          }
+        }
+      });
+    });
+
+    return criticals;
   };
 
   const handleAddCustomParam = (e) => {
@@ -179,16 +261,27 @@ export const TestResultSearch = () => {
 
     setCustomParamsList(prev => [...prev, newParamObj]);
     if (newParamVal.trim()) {
-      setModalResults(prev => ({ ...prev, [paramId]: newParamVal.trim() }));
+      handleParamInputChange(paramId, newParamVal.trim());
     }
     setNewParamName('');
     setNewParamVal('');
     setNewParamRef('');
   };
 
-  const handleSaveModalResults = (e) => {
-    e.preventDefault();
+  const handleSaveModalResults = (e, bypassPanicCheck = false) => {
+    if (e) e.preventDefault();
     if (!activePatientModal) return;
+
+    if (!bypassPanicCheck && !acknowledgedPanicsForSession[activePatientModal.id]) {
+      const panics = scanForCriticalPanicItems(modalResults, activePatientModal);
+      if (panics.length > 0) {
+        setPendingPanicModal({ criticalItems: panics, actionType: 'SAVE' });
+        setPanicClinicianNotified(activePatientModal.referringDoctor || 'Attending Physician');
+        setPanicNotifiedBy(currentUser?.fullName || currentUser?.username || 'Duty Technologist');
+        setPanicRemarks('');
+        return;
+      }
+    }
 
     if (customParamsList.length > 0) {
       activePatientModal.customParameters = customParamsList;
@@ -197,6 +290,79 @@ export const TestResultSearch = () => {
     updatePatientResults(activePatientModal.id, modalResults);
     setActivePatientModal(null);
     addNotification('Results Saved', `Results updated for Lab Code ${activePatientModal.labCode || activePatientModal.uhid}.`, 'success');
+  };
+
+  const handleAuthorizeModal = (e, bypassPanicCheck = false) => {
+    if (e) e.preventDefault();
+    if (!activePatientModal) return;
+
+    if (!bypassPanicCheck && !acknowledgedPanicsForSession[activePatientModal.id]) {
+      const panics = scanForCriticalPanicItems(modalResults, activePatientModal);
+      if (panics.length > 0) {
+        setPendingPanicModal({ criticalItems: panics, actionType: 'AUTHORIZE' });
+        setPanicClinicianNotified(activePatientModal.referringDoctor || 'Attending Physician');
+        setPanicNotifiedBy(currentUser?.fullName || currentUser?.username || 'Senior Pathologist');
+        setPanicRemarks('');
+        return;
+      }
+    }
+
+    if (customParamsList.length > 0) {
+      activePatientModal.customParameters = customParamsList;
+    }
+
+    updatePatientResults(activePatientModal.id, modalResults);
+    authorizeReport(activePatientModal.id, currentUser?.fullName || 'Dr. Pallavi Gedam', modalRemarks);
+    setActivePatientModal(null);
+    addNotification('Report Authorized', `Clinical report signed off and released.`, 'success');
+  };
+
+  const handleConfirmPanicNotification = async () => {
+    if (!panicClinicianNotified.trim()) {
+      alert('Please specify the Clinician / Doctor who was notified of the critical value.');
+      return;
+    }
+
+    const items = pendingPanicModal?.criticalItems || [];
+    try {
+      for (const it of items) {
+        await fetch('/api/audit-logs/panic-acknowledged', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            patientId: activePatientModal.id,
+            uhid: activePatientModal.uhid,
+            paramKey: it.paramKey,
+            paramName: it.paramName,
+            value: it.val,
+            unit: it.unit,
+            panicRange: `${it.panicType}: ${it.panicThreshold}`,
+            clinicianNotified: panicClinicianNotified,
+            notificationMethod: panicNotificationMethod,
+            acknowledgedBy: panicNotifiedBy,
+            remarks: panicRemarks,
+            username: currentUser?.username,
+            role: currentUser?.role
+          })
+        });
+      }
+    } catch (err) {
+      console.warn('[Panic Audit Log] Failed network dispatch, handled locally:', err);
+    }
+
+    setAcknowledgedPanicsForSession(prev => ({
+      ...prev,
+      [activePatientModal.id]: true
+    }));
+
+    const action = pendingPanicModal?.actionType;
+    setPendingPanicModal(null);
+
+    if (action === 'AUTHORIZE') {
+      handleAuthorizeModal(null, true);
+    } else {
+      handleSaveModalResults(null, true);
+    }
   };
 
   const handleDirectPrintSelected = () => {
@@ -788,6 +954,18 @@ export const TestResultSearch = () => {
                 return (
                   <div className="space-y-4">
                     
+                    {/* Clinical Formula Warnings Banner */}
+                    {formulaWarnings.length > 0 && (
+                      <div className="bg-amber-50 border-l-4 border-amber-500 p-3 rounded-r-xl space-y-1">
+                        {formulaWarnings.map((w, wIdx) => (
+                          <div key={wIdx} className="text-amber-800 text-xs font-semibold flex items-center space-x-1.5">
+                            <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                            <span>{w}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                     {/* Top Action Bar for Parameters + Add Custom Parameter Button */}
                     <div className="flex items-center justify-between bg-slate-100/90 p-3 rounded-xl border border-slate-200">
                       <span className="font-bold text-slate-800 text-xs">
@@ -890,38 +1068,91 @@ export const TestResultSearch = () => {
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           {(testObj.parameters || []).map((param, pIdx) => {
                             const paramKey = param.id || `${testObj.id}_p_${pIdx}`;
-                            const val = modalResults[paramKey] ?? '';
-                            const num = Number(val);
+                            const val = modalResults[paramKey] ?? modalResults[param.name] ?? '';
+
+                            // Resolve Age & Gender Specific Biological Reference Range
+                            const resolvedRange = resolveClientReferenceRange({
+                              paramKey,
+                              paramName: param.name,
+                              gender: activePatientModal.gender,
+                              age: activePatientModal.age,
+                              ageType: activePatientModal.ageType
+                            });
+
+                            const effectiveRange = resolvedRange || {
+                              normalLow: param.min,
+                              normalHigh: param.max,
+                              displayText: param.min !== undefined ? `${param.min} - ${param.max}` : (param.defaultVal || 'Normal'),
+                              unit: param.unit
+                            };
+
+                            const evaluation = evaluateClientResultValue(val, effectiveRange);
+
                             let flagBadge = null;
-                            if (val !== '' && !isNaN(num)) {
-                              if (param.max !== undefined && num > param.max) {
-                                flagBadge = <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-800 border border-amber-300">HIGH ▲</span>;
-                              } else if (param.min !== undefined && num < param.min) {
-                                flagBadge = <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-sky-100 text-sky-800 border border-sky-300">LOW ▼</span>;
-                              } else if (param.min !== undefined || param.max !== undefined) {
-                                flagBadge = <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-800">NORMAL</span>;
+                            if (val !== '' && !isNaN(parseFloat(val))) {
+                              if (evaluation.isPanic) {
+                                flagBadge = (
+                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-rose-600 text-white animate-pulse border border-rose-700 shadow-xs flex items-center space-x-1 shrink-0">
+                                    <AlertOctagon className="h-3 w-3" />
+                                    <span>CRITICAL {evaluation.flag}</span>
+                                  </span>
+                                );
+                              } else if (evaluation.flag === 'HIGH') {
+                                flagBadge = <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-800 border border-amber-300 shrink-0">HIGH ▲</span>;
+                              } else if (evaluation.flag === 'LOW') {
+                                flagBadge = <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-sky-100 text-sky-800 border border-sky-300 shrink-0">LOW ▼</span>;
+                              } else if (effectiveRange.normalLow !== undefined || effectiveRange.normalHigh !== undefined) {
+                                flagBadge = <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-800 shrink-0">NORMAL</span>;
                               }
                             }
 
+                            // Check if parameter is auto-calculated
+                            const isCalcParam = ['vldl', 'ldl', 'non_hdl', 'nonhdl', 'chol_hdl', 'cholhdl', 'indirect_bilirubin', 'indirectbilirubin', 'globulin', 'ag_ratio', 'agratio', 'mcv', 'mch', 'mchc', 'anc', 'alc', 'egfr', 'anion_gap'].some(k => paramKey.toLowerCase().includes(k) || (param.name || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(k));
+
                             return (
-                              <div key={paramKey} className="bg-white p-2.5 rounded-lg border border-slate-200 space-y-1 hover:border-sky-300 transition-all">
+                              <div key={paramKey} className={`bg-white p-2.5 rounded-lg border space-y-1 transition-all ${
+                                evaluation.isPanic
+                                  ? 'border-rose-400 bg-rose-50/40 ring-1 ring-rose-400'
+                                  : evaluation.isAbnormal
+                                  ? 'border-amber-300'
+                                  : 'border-slate-200 hover:border-sky-300'
+                              }`}>
                                 <div className="flex justify-between items-center text-[11px]">
-                                  <span className="font-semibold text-slate-700 truncate mr-1">{param.name}</span>
-                                  <span className="text-slate-400 font-mono text-[10px] shrink-0">{param.unit}</span>
+                                  <div className="flex items-center space-x-1 truncate mr-1">
+                                    <span className="font-semibold text-slate-700 truncate">{param.name}</span>
+                                    {isCalcParam && (
+                                      <span className="px-1 py-0.2 rounded text-[8px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 flex items-center space-x-0.5 shrink-0" title="Auto-Calculated Parameter Formula">
+                                        <Calculator className="h-2.5 w-2.5" />
+                                        <span>Auto</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-slate-400 font-mono text-[10px] shrink-0">{param.unit || effectiveRange.unit}</span>
                                 </div>
                                 <div className="flex items-center space-x-1.5">
                                   <input
                                     type="text"
                                     placeholder={param.defaultVal || 'Value'}
                                     value={val}
-                                    onChange={(e) => setModalResults(prev => ({ ...prev, [paramKey]: e.target.value }))}
-                                    className="w-full bg-slate-50 border border-slate-300 rounded p-1.5 font-mono font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500"
+                                    onChange={(e) => handleParamInputChange(paramKey, e.target.value)}
+                                    className={`w-full border rounded p-1.5 font-mono font-bold focus:ring-2 ${
+                                      evaluation.isPanic
+                                        ? 'bg-rose-50/80 border-rose-400 text-rose-900 focus:ring-rose-500/20 focus:border-rose-500'
+                                        : evaluation.isAbnormal
+                                        ? 'bg-amber-50/60 border-amber-300 text-amber-900 focus:ring-amber-500/20'
+                                        : 'bg-slate-50 border-slate-300 text-slate-900 focus:bg-white focus:ring-sky-500/20 focus:border-sky-500'
+                                    }`}
                                   />
                                   {flagBadge}
                                 </div>
-                                <span className="text-[9px] text-slate-400 block font-mono">
-                                  Ref: {param.min !== undefined ? `${param.min} - ${param.max}` : (param.defaultVal || 'Normal')}
-                                </span>
+                                <div className="flex items-center justify-between text-[9px] text-slate-400 font-mono">
+                                  <span>Ref: {effectiveRange.displayText || (effectiveRange.normalLow !== undefined ? `${effectiveRange.normalLow} - ${effectiveRange.normalHigh}` : (param.defaultVal || 'Normal'))}</span>
+                                  {resolvedRange && (
+                                    <span className="text-[8.5px] text-sky-700 font-sans font-semibold">
+                                      {resolvedRange.gender !== 'Both' ? resolvedRange.gender : ''} {activePatientModal.age ? `${activePatientModal.age}${activePatientModal.ageType?.charAt(0) || 'y'}` : ''}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             );
                           })}
@@ -950,7 +1181,7 @@ export const TestResultSearch = () => {
                                 type="text"
                                 placeholder={param.defaultVal || 'Value'}
                                 value={modalResults[param.id] ?? ''}
-                                onChange={(e) => setModalResults({ ...modalResults, [param.id]: e.target.value })}
+                                onChange={(e) => handleParamInputChange(param.id, e.target.value)}
                                 className="w-full bg-slate-50 border border-slate-300 rounded p-1.5 font-mono font-bold text-slate-900 focus:bg-white"
                               />
                               <span className="text-[9px] text-slate-400 block font-mono">
@@ -984,10 +1215,7 @@ export const TestResultSearch = () => {
               <div className="flex items-center justify-between pt-2 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => {
-                    authorizeReport(activePatientModal.id, 'Dr. Pallavi Gedam', modalRemarks);
-                    setActivePatientModal(null);
-                  }}
+                  onClick={handleAuthorizeModal}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs shadow-md flex items-center space-x-1.5"
                 >
                   <CheckCircle2 className="h-4 w-4" />
@@ -1013,6 +1241,143 @@ export const TestResultSearch = () => {
 
             </form>
 
+          </div>
+        </div>
+      )}
+
+      {/* ================= 6. BLOCKING CRITICAL / PANIC ALERT NOTIFICATION MODAL (ISO 15189) ================= */}
+      {pendingPanicModal && (
+        <div className="fixed inset-0 bg-red-950/75 backdrop-blur-md z-60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full shadow-2xl border-2 border-rose-500 p-6 space-y-4 animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="flex items-center space-x-3 border-b border-rose-100 pb-3">
+              <div className="h-12 w-12 rounded-2xl bg-rose-600 text-white flex items-center justify-center shadow-lg shadow-rose-200 shrink-0 animate-bounce">
+                <AlertOctagon className="h-6 w-6" />
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center space-x-2">
+                  <h3 className="font-extrabold text-base text-rose-950">
+                    CRITICAL / PANIC VALUE ALERT
+                  </h3>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-black bg-rose-100 text-rose-800 border border-rose-300 uppercase">
+                    Immediate Action
+                  </span>
+                </div>
+                <p className="text-xs text-rose-700 font-medium">
+                  ISO 15189 & NABL Clinical Protocol: Life-threatening values require immediate clinician notification before releasing.
+                </p>
+              </div>
+            </div>
+
+            {/* Critical Parameters Table */}
+            <div className="bg-rose-50/70 border border-rose-200 rounded-xl p-3 space-y-2">
+              <div className="text-[11px] font-bold text-rose-900 uppercase tracking-wide">
+                Detected Critical Values for {activePatientModal?.name} ({activePatientModal?.age}y / {activePatientModal?.gender})
+              </div>
+              <div className="space-y-1.5">
+                {pendingPanicModal.criticalItems.map((item, cIdx) => (
+                  <div key={cIdx} className="bg-white p-2.5 rounded-lg border border-rose-200 flex items-center justify-between shadow-xs">
+                    <div>
+                      <span className="font-bold text-slate-800 text-xs">{item.paramName}</span>
+                      <span className="text-[10px] text-slate-500 font-mono block">
+                        Normal: {item.refText} {item.unit}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-mono font-black text-sm text-rose-600">
+                        {item.val} {item.unit}
+                      </span>
+                      <span className="px-2 py-0.5 ml-2 rounded text-[9px] font-black bg-rose-600 text-white">
+                        {item.panicType === 'PANIC_HIGH' ? 'HIGH CRITICAL' : 'LOW CRITICAL'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Mandatory Clinician Notification Details */}
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">
+                  Physician / Referring Doctor Notified *
+                </label>
+                <div className="relative">
+                  <User className="h-4 w-4 absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Dr. Ramesh Gupta (MD) / Attending Physician"
+                    value={panicClinicianNotified}
+                    onChange={(e) => setPanicClinicianNotified(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-800 mb-1">
+                    Notification Method *
+                  </label>
+                  <select
+                    value={panicNotificationMethod}
+                    onChange={(e) => setPanicNotificationMethod(e.target.value)}
+                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-xl font-semibold text-slate-800 focus:bg-white"
+                  >
+                    <option>Immediate Phone Call</option>
+                    <option>Urgent WhatsApp Message</option>
+                    <option>In-Person Attending Physician</option>
+                    <option>Emergency Hospital Ward Intercom</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-800 mb-1">
+                    Documented By (Staff Member) *
+                  </label>
+                  <input
+                    type="text"
+                    value={panicNotifiedBy}
+                    onChange={(e) => setPanicNotifiedBy(e.target.value)}
+                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-xl font-semibold text-slate-800 focus:bg-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">
+                  Clinical Action Taken & Remarks
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Doctor acknowledged potassium high, requested urgent repeat test in 2 hours."
+                  value={panicRemarks}
+                  onChange={(e) => setPanicRemarks(e.target.value)}
+                  className="w-full p-2 bg-slate-50 border border-slate-300 rounded-xl font-medium text-slate-800 focus:bg-white"
+                />
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPendingPanicModal(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs"
+              >
+                Cancel & Review Results
+              </button>
+
+              <button
+                type="button"
+                onClick={handleConfirmPanicNotification}
+                className="px-5 py-2.5 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-xl text-xs shadow-md shadow-rose-200 flex items-center space-x-2"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                <span>Confirm Clinician Notification & Proceed</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

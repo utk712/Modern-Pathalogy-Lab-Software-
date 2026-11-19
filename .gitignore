@@ -36,6 +36,17 @@ build/*.blockmap
 secrets.json
 credentials.json
 
+# Vendor license generation tools & databases (private)
+tools/
+server/get_vendor_code.js
+server/data/
+server/backups/
+*.migrated
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.enc
+
 # Scratch and Temporary directories
 scratch/
 tmp/

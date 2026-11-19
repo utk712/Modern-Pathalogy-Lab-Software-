@@ -9,8 +9,16 @@ import {
   Save,
   CheckCircle2,
   FileCode,
-  ShieldCheck
+  ShieldCheck,
+  Network,
+  Users,
+  HardDrive
 } from 'lucide-react';
+import { NetworkSettingsTab } from './NetworkSettingsTab';
+import { StaffUserManagementTab } from './StaffUserManagementTab';
+import { EncryptedBackupsTab } from './EncryptedBackupsTab';
+import { AuditLogViewerTab } from './AuditLogViewerTab';
+import { DoctorCommissionLedgerTab } from './DoctorCommissionLedgerTab';
 
 const SecuritySettingsTab = () => {
   const { labProfile, updateCredentials } = useLab();
@@ -178,7 +186,12 @@ export const LabSettings = () => {
       <div className="flex items-center space-x-2 border-b border-slate-200 pb-2 overflow-x-auto">
         {[
           { id: 'general', label: 'Lab Branding & NABL' },
-          { id: 'security', label: '🔒 User Security & Password Reset' },
+          { id: 'security', label: '🔒 My Password' },
+          { id: 'network', label: '📡 Multi-PC Network (LAN)' },
+          { id: 'users', label: '👥 Staff Accounts (RBAC)' },
+          { id: 'backups', label: '💾 Encrypted Backups' },
+          { id: 'audit', label: '🛡️ Audit Trail (ISO 15189)' },
+          { id: 'commissions', label: '💵 Doctor Commissions' },
           { id: 'doctors', label: 'Consultant Doctors & Signatures' },
           { id: 'analyzers', label: 'Analyzer Bridge (ASTM / HL7)' },
           { id: 'tests', label: 'Diagnostic Test Master Catalog' }
@@ -186,7 +199,7 @@ export const LabSettings = () => {
           <button
             key={t.id}
             onClick={() => setActiveSubTab(t.id)}
-            className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
+            className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
               activeSubTab === t.id
                 ? 'bg-slate-900 text-white shadow-sm'
                 : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
@@ -346,6 +359,31 @@ export const LabSettings = () => {
       {/* Tab 2: User Security & Password Reset */}
       {activeSubTab === 'security' && (
         <SecuritySettingsTab />
+      )}
+
+      {/* Tab: Multi-PC Network Configuration */}
+      {activeSubTab === 'network' && (
+        <NetworkSettingsTab />
+      )}
+
+      {/* Tab: Staff Account Management (RBAC) */}
+      {activeSubTab === 'users' && (
+        <StaffUserManagementTab />
+      )}
+
+      {/* Tab: Automated Encrypted Backups */}
+      {activeSubTab === 'backups' && (
+        <EncryptedBackupsTab />
+      )}
+
+      {/* Tab: Immutable Clinical Audit Trail */}
+      {activeSubTab === 'audit' && (
+        <AuditLogViewerTab />
+      )}
+
+      {/* Tab: Referring Doctor Commission Ledger */}
+      {activeSubTab === 'commissions' && (
+        <DoctorCommissionLedgerTab />
       )}
 
       {/* Tab 4: Diagnostic Test Master */}

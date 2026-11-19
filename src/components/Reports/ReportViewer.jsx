@@ -24,6 +24,10 @@ import { QRCodeSVG } from 'qrcode.react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import confetti from 'canvas-confetti';
+import {
+  resolveClientReferenceRange,
+  evaluateClientResultValue
+} from '../../utils/referenceRangeResolver';
 
 const CBC_STRUCTURED_DATA = {
   testTitle: 'Complete Blood Count',
@@ -116,7 +120,9 @@ export const ReportViewer = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
-  const [shareChannel, setShareChannel] = useState('whatsapp');
+  const [shareChannel, setShareChannel] = useState('whatsapp'); // 'whatsapp' | 'email'
+  const [recipientPhone, setRecipientPhone] = useState('');
+  const [recipientEmail, setRecipientEmail] = useState('');
   const [activePageIndex, setActivePageIndex] = useState('all');
 
   // Requirement 5: Technical QC Validation Gate Modal State
@@ -182,7 +188,7 @@ export const ReportViewer = () => {
           params = testObj.parameters || [];
         }
 
-        // Map parameters to items with REAL patient test results
+        // Map parameters to items with REAL patient test results & Age/Gender-Adjusted Reference Intervals
         const items = [];
         if (Array.isArray(params) && params.length > 0) {
           params.forEach(p => {
@@ -194,26 +200,37 @@ export const ReportViewer = () => {
               ?? p.value 
               ?? '-';
 
-            let refRange = '';
-            if (p.min !== undefined && p.max !== undefined) {
-              refRange = `${p.min} - ${p.max}`;
-            } else if (p.ref) {
-              refRange = p.ref;
-            } else {
-              refRange = p.defaultVal || 'Normal';
-            }
+            // Resolve Dynamic Age & Gender Biological Reference Interval
+            const resolvedRange = resolveClientReferenceRange({
+              paramKey,
+              paramName: p.name,
+              gender: activePatient.gender,
+              age: activePatient.age,
+              ageType: activePatient.ageType
+            });
 
-            const numVal = Number(val);
-            const isAbnormal = (!isNaN(numVal) && ((p.min !== undefined && numVal < p.min) || (p.max !== undefined && numVal > p.max)));
+            const effectiveRange = resolvedRange || {
+              normalLow: p.min,
+              normalHigh: p.max,
+              displayText: (p.min !== undefined && p.max !== undefined) ? `${p.min} - ${p.max}` : (p.ref || p.defaultVal || 'Normal'),
+              unit: p.unit
+            };
+
+            const evaluation = evaluateClientResultValue(val, effectiveRange);
+            const isAbnormal = evaluation.isAbnormal;
+            const flag = evaluation.flag;
+            const isPanic = evaluation.isPanic;
 
             items.push({
               name: p.name,
               value: String(val),
-              unit: p.unit || '',
-              ref: refRange,
+              unit: p.unit || effectiveRange.unit || '',
+              ref: effectiveRange.displayText || `${p.min} - ${p.max}`,
               method: p.method || '',
               isBold: isAbnormal || p.isBold,
-              isAbnormal: isAbnormal
+              isAbnormal,
+              flag,
+              isPanic
             });
           });
         }
@@ -227,18 +244,68 @@ export const ReportViewer = () => {
                 items.push(item);
               } else {
                 const userVal = activePatient.results?.[item.name] || item.value;
-                items.push({ ...item, value: userVal });
+                const resolvedRange = resolveClientReferenceRange({
+                  paramKey: item.name,
+                  paramName: item.name,
+                  gender: activePatient.gender,
+                  age: activePatient.age,
+                  ageType: activePatient.ageType
+                });
+                const evaluation = evaluateClientResultValue(userVal, resolvedRange || { displayText: item.ref });
+                items.push({
+                  ...item,
+                  value: userVal,
+                  ref: resolvedRange?.displayText || item.ref,
+                  isBold: evaluation.isAbnormal || item.isBold,
+                  isAbnormal: evaluation.isAbnormal,
+                  flag: evaluation.flag,
+                  isPanic: evaluation.isPanic
+                });
               }
             });
           } else if (lowerTitle.includes('lipid')) {
             LIPID_STRUCTURED_DATA.items.forEach(item => {
               const userVal = activePatient.results?.[item.name] || item.value;
-              items.push({ ...item, value: userVal });
+              const resolvedRange = resolveClientReferenceRange({
+                paramKey: item.name,
+                paramName: item.name,
+                gender: activePatient.gender,
+                age: activePatient.age,
+                ageType: activePatient.ageType
+              });
+              const evaluation = evaluateClientResultValue(userVal, resolvedRange || { displayText: item.ref });
+              items.push({
+                ...item,
+                value: userVal,
+                ref: resolvedRange?.displayText || item.ref,
+                isBold: evaluation.isAbnormal || item.isBold,
+                isAbnormal: evaluation.isAbnormal,
+                flag: evaluation.flag,
+                isPanic: evaluation.isPanic
+              });
             });
           } else {
             // Pick all results from activePatient.results
             Object.entries(activePatient.results || {}).forEach(([k, v]) => {
-              items.push({ name: k, value: String(v), unit: '', ref: 'Normal', method: '' });
+              const resolvedRange = resolveClientReferenceRange({
+                paramKey: k,
+                paramName: k,
+                gender: activePatient.gender,
+                age: activePatient.age,
+                ageType: activePatient.ageType
+              });
+              const evaluation = evaluateClientResultValue(v, resolvedRange);
+              items.push({
+                name: k,
+                value: String(v),
+                unit: resolvedRange?.unit || '',
+                ref: resolvedRange?.displayText || 'Normal',
+                method: '',
+                isBold: evaluation.isAbnormal,
+                isAbnormal: evaluation.isAbnormal,
+                flag: evaluation.flag,
+                isPanic: evaluation.isPanic
+              });
             });
           }
         }
@@ -321,11 +388,33 @@ export const ReportViewer = () => {
 
   const handleSendDispatch = () => {
     setShowShareModal(false);
-    addNotification(
-      'Report Dispatched',
-      `Report successfully dispatched to ${activePatient.name} via ${shareChannel.toUpperCase()}`,
-      'success'
-    );
+    const patientIdDisplay = activePatient?.labCode || (activePatient?.uhid ? String(activePatient.uhid).replace('UHID-', '30042') : '300425018');
+    const verifyUrl = `https://verify.pulselab.org/report/${patientIdDisplay}?auth=MC4892`;
+    const message = `Dear ${activePatient.name},\nYour diagnostic pathology report from ${labProfile?.labName || reportDesign.labName || 'Modern Diagnostic Lab'} (UHID: ${activePatient.uhid || patientIdDisplay}) is authorized and ready.\n\nVerified Online Report: ${verifyUrl}\n\nReferring Doctor: ${activePatient.referringDoctor || 'Self'}\nThank you for choosing us for your diagnostic care.`;
+
+    if (shareChannel === 'whatsapp') {
+      let digits = (recipientPhone || activePatient.phone || '').replace(/[^0-9]/g, '');
+      if (digits.length === 10) digits = '91' + digits;
+      const waUrl = digits
+        ? `https://wa.me/${digits}?text=${encodeURIComponent(message)}`
+        : `https://wa.me/?text=${encodeURIComponent(message)}`;
+      window.open(waUrl, '_blank');
+      addNotification(
+        'WhatsApp Opened',
+        `Dispatched direct WhatsApp message link for ${activePatient.name}`,
+        'success'
+      );
+    } else {
+      const email = recipientEmail || activePatient.email || '';
+      const subject = `Diagnostic Laboratory Report - ${activePatient.name} (${activePatient.uhid || patientIdDisplay})`;
+      const mailtoUrl = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(message)}`;
+      window.open(mailtoUrl, '_blank');
+      addNotification(
+        'Email Client Opened',
+        `Created email draft with report link for ${activePatient.name}`,
+        'success'
+      );
+    }
   };
 
   return (
@@ -695,14 +784,28 @@ export const ReportViewer = () => {
                         );
                       }
 
+                      const isHigh = item.flag === 'HIGH';
+                      const isLow = item.flag === 'LOW';
+                      const isPanic = item.isPanic;
+
                       return (
-                        <div key={idx} className="grid grid-cols-12 items-center py-0.5 text-black">
-                          <div className={`col-span-5 ${item.isHeaderBold ? 'font-bold' : item.isBold ? 'font-bold' : 'font-normal'}`}>
+                        <div key={idx} className={`grid grid-cols-12 items-center py-0.5 text-black ${isPanic ? 'bg-red-50/60 font-semibold' : ''}`}>
+                          <div className={`col-span-5 ${item.isHeaderBold ? 'font-bold' : item.isBold ? 'font-bold text-black' : 'font-normal'}`}>
                             {item.name}
                           </div>
 
-                          <div className={`col-span-2 text-center ${item.isBold ? 'font-black text-[13px]' : 'font-normal'}`}>
-                            {item.value}
+                          <div className={`col-span-2 text-center ${item.isBold ? 'font-black text-[13px]' : 'font-normal'} flex items-center justify-center`}>
+                            <span className={isPanic ? 'text-red-700 font-extrabold' : ''}>{item.value}</span>
+                            {isHigh && (
+                              <span className="font-bold text-[9.5px] text-red-600 bg-red-50 border border-red-200 px-1 py-0.2 rounded font-sans ml-1">
+                                [H]
+                              </span>
+                            )}
+                            {isLow && (
+                              <span className="font-bold text-[9.5px] text-blue-600 bg-blue-50 border border-blue-200 px-1 py-0.2 rounded font-sans ml-1">
+                                [L]
+                              </span>
+                            )}
                           </div>
 
                           <div className="col-span-2 text-left pl-3 font-normal">
@@ -710,7 +813,7 @@ export const ReportViewer = () => {
                           </div>
 
                           <div className="col-span-3 flex items-center justify-between font-normal text-[11.5px]">
-                            <span>{item.ref}</span>
+                            <span className="font-medium">{item.ref}</span>
                             {item.method && (
                               <span className="text-[9px] text-slate-800 font-sans tracking-tight text-right shrink-0 pl-1">
                                 {item.method}
@@ -788,40 +891,99 @@ export const ReportViewer = () => {
 
       </div>
 
-      {/* WhatsApp Modal */}
+      {/* WhatsApp & Email Dispatch Modal */}
       {showShareModal && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl p-6 border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center space-x-3 text-emerald-600">
-              <MessageSquare className="h-6 w-6" />
-              <h3 className="font-bold text-base text-slate-900">Dispatch Medical Report</h3>
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2.5 text-emerald-600">
+                <MessageSquare className="h-5 w-5" />
+                <h3 className="font-bold text-base text-slate-900">Dispatch Report & QR Link</h3>
+              </div>
+              <button onClick={() => setShowShareModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="h-5 w-5" />
+              </button>
             </div>
 
-            <p className="text-xs text-slate-600">
-              Send PDF link directly to <strong>{activePatient.name}</strong>:
-            </p>
+            {/* Channel Selection */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setShareChannel('whatsapp')}
+                className={`p-2.5 rounded-xl font-bold border transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
+                  shareChannel === 'whatsapp'
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <span>WhatsApp Direct (wa.me)</span>
+              </button>
 
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-1.5 font-mono text-[11px] text-slate-700">
-              Patient: {activePatient.name} ({activePatient.uhid})
-              <br />
-              Doctor: {activePatient.referringDoctor}
-              <br />
-              Pages: {totalPages} Tests
+              <button
+                type="button"
+                onClick={() => setShareChannel('email')}
+                className={`p-2.5 rounded-xl font-bold border transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
+                  shareChannel === 'email'
+                    ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <span>Email Client (mailto:)</span>
+              </button>
+            </div>
+
+            {shareChannel === 'whatsapp' ? (
+              <div className="space-y-1.5 text-xs">
+                <label className="block font-bold text-slate-700">Patient / Recipient Mobile Number</label>
+                <input
+                  type="text"
+                  placeholder="e.g. 9876543210 (10 digits)"
+                  value={recipientPhone !== '' ? recipientPhone : (activePatient.phone || '')}
+                  onChange={(e) => setRecipientPhone(e.target.value)}
+                  className="w-full p-2 bg-slate-50 border border-slate-300 rounded-xl font-mono text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-500/20"
+                />
+                <span className="text-[10px] text-slate-500 block">
+                  Opens WhatsApp Web or Desktop directly with verified NABL report link.
+                </span>
+              </div>
+            ) : (
+              <div className="space-y-1.5 text-xs">
+                <label className="block font-bold text-slate-700">Recipient Email Address</label>
+                <input
+                  type="email"
+                  placeholder="patient@gmail.com"
+                  value={recipientEmail !== '' ? recipientEmail : (activePatient.email || '')}
+                  onChange={(e) => setRecipientEmail(e.target.value)}
+                  className="w-full p-2 bg-slate-50 border border-slate-300 rounded-xl font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-sky-500/20"
+                />
+              </div>
+            )}
+
+            {/* Message Preview */}
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-1 font-mono text-[10.5px] text-slate-600">
+              <span className="font-bold text-slate-800 block">Preview Message:</span>
+              <p className="line-clamp-3">
+                Dear {activePatient.name}, your diagnostic report from {labProfile?.labName || reportDesign.labName || 'Modern Diagnostic Lab'} (UHID: {activePatient.uhid}) is authorized and ready for viewing.
+              </p>
             </div>
 
             <div className="flex justify-end space-x-2 pt-2 border-t border-slate-100">
               <button
+                type="button"
                 onClick={() => setShowShareModal(false)}
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs"
               >
                 Cancel
               </button>
               <button
+                type="button"
                 onClick={handleSendDispatch}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs shadow-md flex items-center space-x-1.5"
+                className={`px-4 py-2 text-white font-bold rounded-xl text-xs shadow-md flex items-center space-x-1.5 cursor-pointer ${
+                  shareChannel === 'whatsapp' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-sky-600 hover:bg-sky-500'
+                }`}
               >
                 <Send className="h-3.5 w-3.5" />
-                <span>Send PDF Link</span>
+                <span>{shareChannel === 'whatsapp' ? 'Open in WhatsApp' : 'Open Email Draft'}</span>
               </button>
             </div>
           </div>

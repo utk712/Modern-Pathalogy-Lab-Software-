@@ -2,7 +2,31 @@ const http = require('http');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
-const { getDb, saveDb } = require('./db.js');
+const {
+  getDb,
+  saveDb,
+  logAudit,
+  getAuditLogs,
+  resolveReferenceRange,
+  evaluateResultValue,
+  getDoctors,
+  upsertDoctor,
+  recordDoctorCommission,
+  getDoctorCommissions,
+  settleDoctorCommissions,
+  db: sqliteInstance
+} = require('./db.js');
+const { verifyLicenseKey } = require('./license_engine.js');
+const { performDailyBackup, listBackups, verifyBackupIntegrity, BACKUP_DIR } = require('./backup_service.js');
+const { getNetworkConfig, saveNetworkConfig, getLocalNetworkAddresses } = require('./network_config.js');
+const {
+  isRoleAuthorized,
+  authenticateUser,
+  getSessionFromRequest,
+  createUser,
+  listUsers,
+  updateUser
+} = require('./auth_middleware.js');
 const { attachWebSocketServer, handleSseConnection, broadcastLiveSync } = require('./websocket_server.js');
 const { isAnalyzerQuery, handleAnalyzerQuery } = require('./bidirectional_controller.js');
 const { processThroughQCGate, commitStagedRecord, rejectStagedRecord } = require('./qc_gate.js');
@@ -26,23 +50,6 @@ const MIME_TYPES = {
   '.ttf': 'font/ttf',
   '.pdf': 'application/pdf'
 };
-
-const BACKUP_DIR = path.join('C:', 'ModernLIMS_Backups');
-
-function performDailyBackup() {
-  try {
-    if (!fs.existsSync(BACKUP_DIR)) {
-      fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    }
-    const db = getDb();
-    const dateStr = new Date().toISOString().split('T')[0];
-    const backupFile = path.join(BACKUP_DIR, `lims_backup_${dateStr}.json`);
-    fs.writeFileSync(backupFile, JSON.stringify(db, null, 2), 'utf8');
-    console.log(`[Backup] Automated snapshot created: ${backupFile}`);
-  } catch (err) {
-    console.warn('[Backup] Could not create snapshot:', err.message);
-  }
-}
 
 function setCorsHeaders(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -138,205 +145,245 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (pathname === '/api/license-info' && req.method === 'POST') {
+    if ((pathname === '/api/license-info' || pathname === '/api/license/activate') && req.method === 'POST') {
       const db = getDb();
       const body = await parseJsonBody(req);
-      db.licenseInfo = body;
+      const effectiveLab = body.labName || db.labProfile?.labName || 'Modern Diagnostic Pathology Lab';
+      const verification = verifyLicenseKey(effectiveLab, body.licenseKey);
+
+      if (!verification.valid) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: verification.error }));
+        return;
+      }
+
+      db.licenseInfo = {
+        labName: verification.labName,
+        licenseKey: body.licenseKey.trim().toUpperCase(),
+        daysRemaining: verification.daysRemaining,
+        humanRemaining: verification.humanRemaining,
+        expiryTimestamp: verification.expiryTimestamp,
+        expiryDate: verification.expiryDate,
+        formattedExpiry: verification.formattedExpiry,
+        isExpired: false
+      };
       saveDb(db);
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, licenseInfo: db.licenseInfo }));
       return;
     }
 
-    // 2. VENDOR MASTER SETUP (Technician Initial Setup)
-    if (pathname === '/api/vendor/master-setup' && req.method === 'POST') {
-      const db = getDb();
-      const body = await parseJsonBody(req);
-      const { labName, securityKey, defaultUsername, defaultPassword, durationValue, durationUnit, expiryTimestamp, formattedExpiry } = body;
-
-      db.masterVendorConfig = {
-        labName: labName || 'Modern Diagnostic Pathology Lab',
-        securityKey,
-        defaultUsername: defaultUsername || 'admin',
-        defaultPassword: defaultPassword || 'admin123',
-        durationValue: durationValue || 180,
-        durationUnit: durationUnit || 'days',
-        expiryTimestamp: expiryTimestamp || (Date.now() + 180 * 24 * 60 * 60 * 1000),
-        formattedExpiry: formattedExpiry || ''
-      };
-
-      db.licenseInfo = {
-        labName: db.masterVendorConfig.labName,
-        licenseKey: securityKey,
-        expiryTimestamp: db.masterVendorConfig.expiryTimestamp,
-        formattedExpiry: db.masterVendorConfig.formattedExpiry,
-        isExpired: false
-      };
-
-      db.labProfile = {
-        labName: db.masterVendorConfig.labName,
-        adminUsername: db.masterVendorConfig.defaultUsername,
-        adminPassword: db.masterVendorConfig.defaultPassword,
-        isRegistered: false,
-        address: '',
-        city: '',
-        pathologistName: ''
-      };
-
-      saveDb(db);
+    // 2. MULTI-PC NETWORK LAN CONFIGURATION
+    if (pathname === '/api/network/info' && req.method === 'GET') {
+      const config = getNetworkConfig();
+      const lanAddresses = getLocalNetworkAddresses();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, masterConfig: db.masterVendorConfig }));
+      res.end(JSON.stringify({
+        success: true,
+        config,
+        lanAddresses,
+        port: PORT,
+        primaryHostUrl: `http://${lanAddresses[0]?.ip || 'localhost'}:${PORT}`
+      }));
       return;
     }
 
-    // 2b. VENDOR KEY HISTORY LOGS
-    if (pathname === '/api/vendor/key-history' && req.method === 'GET') {
-      const db = getDb();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, keyHistory: db.vendorKeyHistory || [] }));
+    if (pathname === '/api/network/config' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const outcome = saveNetworkConfig(body);
+      res.writeHead(outcome.success ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
       return;
     }
 
-    if (pathname === '/api/vendor/key-history' && req.method === 'POST') {
-      const db = getDb();
+    // 2b. RBAC USER MANAGEMENT (Admin Only)
+    if (pathname === '/api/users' && req.method === 'GET') {
+      const users = listUsers();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, users }));
+      return;
+    }
+
+    if (pathname === '/api/users' && req.method === 'POST') {
       const body = await parseJsonBody(req);
-      if (body && body.licenseKey) {
-        db.vendorKeyHistory = db.vendorKeyHistory || [];
-        db.vendorKeyHistory = [body, ...db.vendorKeyHistory.filter(x => x.licenseKey !== body.licenseKey)];
-        saveDb(db);
+      const outcome = createUser(body);
+      res.writeHead(outcome.success ? 201 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
+      return;
+    }
+
+    if (pathname.startsWith('/api/users/') && req.method === 'PUT') {
+      const userId = pathname.replace('/api/users/', '');
+      const body = await parseJsonBody(req);
+      const outcome = updateUser(userId, body);
+      res.writeHead(outcome.success ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
+      return;
+    }
+
+    // 2c. IMMUTABLE CLINICAL AUDIT LOGS (Read-Only)
+    if (pathname === '/api/audit-logs' && req.method === 'GET') {
+      const entityId = url.searchParams.get('entityId');
+      const username = url.searchParams.get('username');
+      const limit = parseInt(url.searchParams.get('limit') || '100', 10);
+      const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+      const logs = getAuditLogs({ entityId, username, limit, offset });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, count: logs.length, logs }));
+      return;
+    }
+
+    // 2d. BIOLOGICAL REFERENCE INTERVALS (ISO 15189 / NABL)
+    if (pathname === '/api/reference-ranges' && req.method === 'GET') {
+      const testId = url.searchParams.get('testId');
+      const paramKey = url.searchParams.get('paramKey');
+      let query = 'SELECT * FROM reference_ranges';
+      const params = [];
+      const where = [];
+      if (testId) {
+        where.push('test_id = ?');
+        params.push(testId);
+      }
+      if (paramKey) {
+        where.push('(param_key = ? OR param_name = ?)');
+        params.push(paramKey, paramKey);
+      }
+      if (where.length > 0) query += ' WHERE ' + where.join(' AND ');
+      query += ' ORDER BY param_name, min_age_days';
+      const ranges = sqliteInstance.prepare(query).all(...params);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, count: ranges.length, ranges }));
+      return;
+    }
+
+    if (pathname === '/api/reference-ranges/resolve' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const range = resolveReferenceRange(body);
+      let evaluation = null;
+      if (range && body.value !== undefined) {
+        evaluation = evaluateResultValue(body.value, range);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, keyHistory: db.vendorKeyHistory || [] }));
+      res.end(JSON.stringify({ success: true, range, evaluation }));
       return;
     }
 
-    if ((pathname === '/api/vendor/key-history' || pathname.startsWith('/api/vendor/key-history/')) && req.method === 'DELETE') {
-      const db = getDb();
-      const parts = pathname.split('/');
-      const keyIdOrLicense = parts.length > 4 ? decodeURIComponent(parts[4]) : null;
-      if (keyIdOrLicense) {
-        db.vendorKeyHistory = (db.vendorKeyHistory || []).filter(x => (x.id !== keyIdOrLicense && x.licenseKey !== keyIdOrLicense));
-      } else {
-        db.vendorKeyHistory = [];
-      }
-      saveDb(db);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'Vendor key history hard-deleted.', keyHistory: db.vendorKeyHistory }));
-      return;
-    }
-
-    // 2c. VENDOR MAINTENANCE AUDIT LEDGER LOGS
-    if (pathname === '/api/vendor/maintenance-ledger' && req.method === 'GET') {
-      const db = getDb();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, auditLedger: db.vendorAuditLedger || [] }));
-      return;
-    }
-
-    if (pathname === '/api/vendor/maintenance-ledger' && req.method === 'POST') {
-      const db = getDb();
+    // 2e. CRITICAL / PANIC VALUE CLINICIAN NOTIFICATION AUDIT
+    if (pathname === '/api/audit-logs/panic-acknowledged' && req.method === 'POST') {
       const body = await parseJsonBody(req);
-      if (body && body.actionType) {
-        db.vendorAuditLedger = db.vendorAuditLedger || [];
-        db.vendorAuditLedger = [body, ...db.vendorAuditLedger.slice(0, 100)];
-        saveDb(db);
-      }
+      const session = getSessionFromRequest(req, activeSessions);
+      const username = session?.username || body.username || 'technician';
+      const role = session?.role || body.role || 'technician';
+
+      logAudit({
+        userId: session?.userId || 'usr-tech-01',
+        username,
+        role,
+        action: 'PANIC_VALUE_ACKNOWLEDGED',
+        entityType: 'patient_result',
+        entityId: body.patientId || body.uhid || 'UNKNOWN',
+        testId: body.testId || null,
+        paramKey: body.paramKey || null,
+        oldValue: null,
+        newValue: String(body.value || ''),
+        details: JSON.stringify({
+          parameter: body.paramName || body.paramKey,
+          value: body.value,
+          unit: body.unit,
+          panicRange: body.panicRange,
+          clinicianNotified: body.clinicianNotified,
+          notificationMethod: body.notificationMethod,
+          acknowledgedBy: body.acknowledgedBy || username,
+          timestamp: new Date().toISOString(),
+          remarks: body.remarks || ''
+        })
+      });
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, auditLedger: db.vendorAuditLedger || [] }));
+      res.end(JSON.stringify({ success: true, message: 'Panic alert clinician notification recorded in immutable audit log.' }));
       return;
     }
 
-    if (pathname === '/api/vendor/maintenance-ledger' && req.method === 'DELETE') {
-      const db = getDb();
-      db.vendorAuditLedger = [];
-      saveDb(db);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'Vendor maintenance audit log hard-deleted.', auditLedger: [] }));
-      return;
-    }
-
-    // 2d. MASTER VENDOR CLEAR ALL DATA (HARD DELETE)
-    if (pathname === '/api/vendor/clear-all' && req.method === 'POST') {
-      const db = getDb();
-      db.vendorKeyHistory = [];
-      db.vendorAuditLedger = [];
-      saveDb(db);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'All vendor history and audit data permanently deleted.' }));
-      return;
-    }
-
-    // 3. AUTHENTICATION & SINGLE-DEVICE SESSION MANAGEMENT (3-Factor Auth)
+    // 3. AUTHENTICATION & MULTI-USER RBAC LOGIN
     if (pathname === '/api/auth/login' && req.method === 'POST') {
       const db = getDb();
       const body = await parseJsonBody(req);
       const { username, password, securityKey, role, deviceName, ipAddress } = body;
 
-      const master = db.masterVendorConfig || {};
-      const profile = db.labProfile || {};
-      const expectedUser = (profile.adminUsername || master.defaultUsername || 'admin').trim().toLowerCase();
-      const expectedPass = (profile.adminPassword || master.defaultPassword || 'admin123').trim();
-      const activeKey = (db.licenseInfo?.licenseKey || master.securityKey || '').trim().toUpperCase();
+      const effectiveLab = db.labProfile?.labName || 'Modern Diagnostic Pathology Lab';
+      const activeKey = (securityKey || db.licenseInfo?.licenseKey || '').trim().toUpperCase();
 
-      const inputUser = (username || '').trim().toLowerCase();
-      const inputPass = (password || '').trim();
-      const inputKey = (securityKey || '').trim().toUpperCase();
+      // 1. Verify Security License Key on Backend
+      const licenseVerification = verifyLicenseKey(effectiveLab, activeKey);
+      if (!licenseVerification.valid) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: false,
+          error: licenseVerification.error || 'Invalid or Expired Security License Key.'
+        }));
+        return;
+      }
 
-      // 1. Verify Username & Password
-      if (inputUser !== expectedUser || inputPass !== expectedPass) {
+      // 2. Authenticate User Credentials against SQLite RBAC Users table
+      let authOutcome = authenticateUser(username, password);
+
+      if (!authOutcome.success) {
+        // Fallback check against legacy labProfile admin credentials if user not yet created
+        const profile = db.labProfile || {};
+        const legacyUser = (profile.adminUsername || 'admin').trim().toLowerCase();
+        const legacyPass = (profile.adminPassword || 'admin123').trim();
+        const inputUser = (username || '').trim().toLowerCase();
+        const inputPass = (password || '').trim();
+
+        if (inputUser === legacyUser && inputPass === legacyPass) {
+          // Auto-seed user into SQLite
+          createUser({
+            username: inputUser,
+            password: inputPass,
+            fullName: profile.adminName || 'Administrator',
+            role: 'admin'
+          });
+          const retry = authenticateUser(username, password);
+          if (retry.success) {
+            authOutcome = retry;
+          }
+        }
+      }
+
+      if (!authOutcome.success) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           success: false,
-          error: 'Invalid Username or Password. Access Denied.'
+          error: authOutcome.error || 'Invalid Username or Password. Access Denied.'
         }));
         return;
       }
-
-      // 2. Verify Security Key format and presence
-      if (!inputKey || inputKey.length < 10) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          success: false,
-          error: 'Please enter a valid Security Key.'
-        }));
-        return;
-      }
-
-      // 3. Generate Valid Authenticated Session
-      const sessionId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const userKey = inputUser;
 
       const userSession = {
-        sessionId,
-        userKey,
-        username: profile.adminUsername || master.defaultUsername || 'admin',
-        name: profile.adminName || profile.directorName || profile.pathologistName || 'Administrator',
-        role: role || 'admin',
+        sessionId: authOutcome.sessionId,
+        userKey: authOutcome.user.username,
+        username: authOutcome.user.username,
+        name: authOutcome.user.name,
+        role: authOutcome.user.role,
+        permissions: authOutcome.user.permissions,
+        signatureImage: authOutcome.user.signatureImage,
         deviceName: deviceName || 'Windows Workstation',
-        ipAddress: ipAddress || '127.0.0.1',
+        ipAddress: ipAddress || req.socket.remoteAddress || '127.0.0.1',
         loginTime: new Date().toISOString(),
         lastHeartbeat: Date.now()
       };
 
-      activeSessions[userKey] = userSession;
-      if (!db.activeSessions) db.activeSessions = {};
-      db.activeSessions[userKey] = userSession;
-      saveDb(db);
-
-      const isFirstTime = !profile.isRegistered || !profile.address || !profile.pathologistName;
+      activeSessions[authOutcome.user.username] = userSession;
+      const isFirstTime = !db.labProfile || !db.labProfile.isRegistered || !db.labProfile.address;
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         success: true,
-        sessionId,
+        sessionId: authOutcome.sessionId,
         isFirstTime,
-        user: {
-          username: userSession.username,
-          name: userSession.name,
-          role: userSession.role,
-          deviceName: userSession.deviceName,
-          loginTime: userSession.loginTime
-        }
+        user: userSession
       }));
       return;
     }
@@ -449,8 +496,54 @@ const server = http.createServer(async (req, res) => {
       const newPatient = await parseJsonBody(req);
       db.patients = [newPatient, ...(db.patients || [])];
       saveDb(db);
+
+      // Record referring doctor commission ledger entry if applicable
+      try {
+        recordDoctorCommission(newPatient);
+      } catch (commErr) {
+        console.warn('[Doctor Commission] Record error on patient registration:', commErr.message);
+      }
+
       res.writeHead(201, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, patient: newPatient }));
+      return;
+    }
+
+    // 4b. REFERRING DOCTORS & COMMISSION LEDGER (Phase 4 Accounting)
+    if (pathname === '/api/doctors' && req.method === 'GET') {
+      const docs = getDoctors();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, count: docs.length, doctors: docs }));
+      return;
+    }
+
+    if (pathname === '/api/doctors' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const savedDoc = upsertDoctor(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, doctor: savedDoc }));
+      return;
+    }
+
+    if (pathname === '/api/commissions' && req.method === 'GET') {
+      const doctorName = url.searchParams.get('doctorName') || 'ALL';
+      const status = url.searchParams.get('status') || 'ALL';
+      const fromDate = url.searchParams.get('fromDate');
+      const toDate = url.searchParams.get('toDate');
+
+      const outcome = getDoctorCommissions({ doctorName, status, fromDate, toDate });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, ...outcome }));
+      return;
+    }
+
+    if (pathname === '/api/commissions/settle' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const session = getSessionFromRequest(req, activeSessions);
+      const settledBy = session?.username || body.settledBy || 'admin';
+      const outcome = settleDoctorCommissions(body.commissionIds || [], settledBy);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
       return;
     }
 
@@ -701,21 +794,31 @@ const server = http.createServer(async (req, res) => {
       const body = await parseJsonBody(req);
       const db = getDb();
       
+      const session = getSessionFromRequest(req);
+      if (session && session.role !== 'admin' && session.role !== 'pathologist') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: false,
+          error: 'Access Denied: Only a verified Consultant Pathologist or Administrator can authorize and release clinical reports.'
+        }));
+        return;
+      }
+
       let matchedPatient = null;
       if (Array.isArray(db.patients)) {
         matchedPatient = db.patients.find(p => p.id === patientId || p.uhid === patientId || p.barcode === patientId);
         if (matchedPatient) {
           matchedPatient.status = 'AUTHORIZED';
-          matchedPatient.approvedBy = body.supervisorName || 'Chief Pathologist / QC Supervisor';
+          matchedPatient.approvedBy = body.supervisorName || session?.full_name || 'Chief Pathologist';
           matchedPatient.approvalTime = new Date().toISOString();
           matchedPatient.qcVerification = {
-            verifiedBy: body.supervisorName || 'Chief Pathologist / QC Supervisor',
+            verifiedBy: body.supervisorName || session?.full_name || 'Chief Pathologist',
             verifiedAt: new Date().toISOString(),
             status: 'QC_VERIFIED_AND_RELEASED',
             remarks: body.remarks || 'All clinical parameters verified against calibration controls and delta history.'
           };
           matchedPatient.doctorReview = {
-            authorizedBy: body.supervisorName || 'Chief Pathologist / QC Supervisor',
+            authorizedBy: body.supervisorName || session?.full_name || 'Chief Pathologist',
             authorizedAt: new Date().toISOString(),
             remarks: body.remarks || 'All clinical parameters verified against calibration controls and delta history.'
           };
@@ -723,6 +826,17 @@ const server = http.createServer(async (req, res) => {
             matchedPatient.tests = matchedPatient.tests.map(t => ({ ...t, status: 'AUTHORIZED' }));
           }
           saveDb(db);
+
+          logAudit({
+            userId: session?.user_id || null,
+            username: session?.username || body.supervisorName || 'pathologist',
+            role: session?.role || 'pathologist',
+            action: 'REPORT_RELEASE',
+            entityType: 'patient',
+            entityId: patientId,
+            details: `Clinical diagnostic report authorized and released by ${matchedPatient.approvedBy}`
+          });
+
           broadcastLiveSync('QC_REPORT_RELEASED', { patient: matchedPatient });
         }
       }
@@ -795,29 +909,26 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 9. AUTOMATED BACKUPS
+    // 9. AUTOMATED ENCRYPTED BACKUPS
     if (pathname === '/api/system/backups' && req.method === 'GET') {
-      try {
-        if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-        const files = fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith('.json')).map(f => ({
-          filename: f,
-          path: path.join(BACKUP_DIR, f),
-          sizeBytes: fs.statSync(path.join(BACKUP_DIR, f)).size,
-          createdAt: fs.statSync(path.join(BACKUP_DIR, f)).mtime
-        }));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ backups: files }));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
-      }
+      const backups = listBackups();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ backups, backupDirectory: BACKUP_DIR }));
       return;
     }
 
     if (pathname === '/api/system/backup-now' && req.method === 'POST') {
-      performDailyBackup();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'Snapshot backup created successfully in C:\\ModernLIMS_Backups' }));
+      const outcome = await performDailyBackup();
+      res.writeHead(outcome.success ? 200 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
+      return;
+    }
+
+    if (pathname === '/api/system/backup-verify' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      const outcome = verifyBackupIntegrity(body.filename);
+      res.writeHead(outcome.valid ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(outcome));
       return;
     }
 
@@ -1168,21 +1279,26 @@ try {
 // Attach Real-Time WebSocket Server
 attachWebSocketServer(server);
 
-server.listen(PORT, () => {
+const lanAddrs = getLocalNetworkAddresses();
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n======================================================`);
   console.log(`🏥 Modern Diagnostic LIMS - Standalone Central Engine`);
   console.log(`🌐 Local Application URL: http://localhost:${PORT}`);
-  console.log(`⚡ WebSocket Live Sync: Active (ws://localhost:${PORT}/ws & /api/hardware/sse)`);
+  lanAddrs.forEach(a => {
+    console.log(`📡 Multi-PC LAN Address (${a.interface}): http://${a.ip}:${PORT}`);
+  });
+  console.log(`⚡ WebSocket Live Sync: Active (ws://0.0.0.0:${PORT}/ws & /api/hardware/sse)`);
   console.log(`🔄 Bi-Directional Order Engine: Active (ASTM Q / HL7 QRY Query Handler)`);
   console.log(`🛡️ QC Validation Gate: Active (Panic Limit & Delta Check Staging)`);
   console.log(`🔌 Hardware TCP Server: Active on Port ${TCP_PORT}`);
   console.log(`🔌 RS-232 Serial Port Driver: Ready (COM Port Scanning & Ingestion)`);
   console.log(`📊 Test Master: Active (1,148 Diagnostic Tests & Modalities)`);
-  console.log(`💾 Auto-Backup: Active (Destination: C:\\ModernLIMS_Backups)`);
+  console.log(`💾 Encrypted Auto-Backup: Active (Destination: ${BACKUP_DIR})`);
   console.log(`======================================================\n`);
   
   performDailyBackup();
-  setInterval(performDailyBackup, 6 * 60 * 60 * 1000);
+  setInterval(performDailyBackup, 24 * 60 * 60 * 1000);
 
   if (process.send) {
     process.send('READY');

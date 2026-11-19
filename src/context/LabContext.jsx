@@ -12,7 +12,9 @@ import { MASTER_TEST_CATALOG } from '../data/masterTestCatalog';
 import { verifyLicenseKey } from '../utils/licenseCrypto';
 import { verifyLicenseOnCloud } from '../config/firebase';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = typeof window !== 'undefined' && window.location.origin && window.location.origin !== 'null' && window.location.origin.startsWith('http')
+  ? `${window.location.origin}/api`
+  : 'http://localhost:5000/api';
 
 const DEFAULT_REPORT_DESIGN = {
   // Header Setup
@@ -369,7 +371,15 @@ export const LabProvider = ({ children }) => {
       }
 
       const newSessionId = data.sessionId || `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const userObj = {
+      const userObj = data.user ? {
+        username: data.user.username || inputUser,
+        name: data.user.name || 'Administrator',
+        role: data.user.role || 'admin',
+        permissions: data.user.permissions || [],
+        signatureImage: data.user.signatureImage || null,
+        deviceName: deviceName || 'Windows Workstation',
+        loginTime: new Date().toISOString()
+      } : {
         username: inputUser,
         name: labProfile?.adminName || labProfile?.pathologistName || 'Administrator',
         role: role || 'admin',

@@ -20,7 +20,6 @@ import {
   ShieldAlert,
   LogIn
 } from 'lucide-react';
-import { VendorMasterSetupModal } from '../Auth/VendorMasterSetupModal';
 import { useLab } from '../../context/LabContext';
 
 export const WelcomeScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboarding, onBack }) => {
@@ -41,8 +40,6 @@ export const WelcomeScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboardi
     if (onBack) onBack();
   };
 
-  // Vendor Master Setup Modal state
-  const [showVendorModal, setShowVendorModal] = useState(false);
   const [testCount, setTestCount] = useState(0);
 
   // Animated Counter Effect for 1,148 Test Master
@@ -64,28 +61,6 @@ export const WelcomeScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboardi
 
     return () => clearInterval(timer);
   }, []);
-
-  // Keyboard shortcut Ctrl + Shift + V for Technician Master Setup
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
-        e.preventDefault();
-        setShowVendorModal(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  const handleConfigApplied = (config) => {
-    if (config.username) setUsername(config.username);
-    if (config.password) setPassword(config.password);
-    if (config.securityKey) setSecurityKey(config.securityKey);
-    if (updateMasterConfig) {
-      updateMasterConfig(config);
-    }
-    setShowVendorModal(false);
-  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -152,13 +127,10 @@ export const WelcomeScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboardi
           </div>
 
           <div className="flex items-center space-x-3">
-            <button
-              onClick={() => setShowVendorModal(true)}
-              className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
-            >
-              <Lock className="h-3.5 w-3.5 text-amber-600" />
-              <span>👑 Vendor Setup (Ctrl+Shift+V)</span>
-            </button>
+            <span className="px-3 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-xl flex items-center space-x-1.5">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span>Online Engine</span>
+            </span>
           </div>
 
         </div>
@@ -350,19 +322,6 @@ export const WelcomeScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboardi
 
                 </form>
 
-                {/* Technician Vendor Setup Button inside Card */}
-                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
-                  <span className="text-slate-400">Technician Gateway:</span>
-                  <button
-                    type="button"
-                    onClick={() => setShowVendorModal(true)}
-                    className="text-amber-700 font-bold hover:underline flex items-center space-x-1 cursor-pointer"
-                  >
-                    <Lock className="h-3.5 w-3.5 text-amber-600" />
-                    <span>Vendor Setup (Ctrl+Shift+V)</span>
-                  </button>
-                </div>
-
               </div>
 
             </div>
@@ -381,13 +340,6 @@ export const WelcomeScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboardi
         </div>
         <span className="text-[11px]">Official Commercial Release v1.0.6</span>
       </footer>
-
-      {/* Vendor Master Setup Modal (Ctrl + Shift + V) */}
-      <VendorMasterSetupModal
-        isOpen={showVendorModal}
-        onClose={() => setShowVendorModal(false)}
-        onApplyConfig={handleConfigApplied}
-      />
 
     </div>
   );

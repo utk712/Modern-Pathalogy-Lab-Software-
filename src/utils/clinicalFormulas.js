@@ -176,3 +176,156 @@ export function evaluateCustomFormula(formulaStr, valuesMap) {
     return null;
   }
 }
+
+/**
+ * 7. AUTOMATIC PARAMETER CALCULATION PIPELINE
+ * Evaluates pending patient inputs and calculates all dependent formulas (Lipid, LFT, CBC, RFT).
+ * Returns an object with updated values and any clinical warnings.
+ */
+export function applyAutoCalculations(resultsMap = {}, patientMeta = {}) {
+  const updated = { ...resultsMap };
+  const warnings = [];
+
+  // Helper to extract value by multiple possible candidate keys
+  const getVal = (...keys) => {
+    for (const k of keys) {
+      if (updated[k] !== undefined && updated[k] !== null && String(updated[k]).trim() !== '') {
+        const num = parseFloat(updated[k]);
+        if (!isNaN(num)) return num;
+      }
+    }
+    // Try normalized match
+    for (const [existingKey, val] of Object.entries(updated)) {
+      if (val === undefined || val === null || String(val).trim() === '') continue;
+      const cleanKey = existingKey.toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (const k of keys) {
+        const cleanTarget = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (cleanKey.includes(cleanTarget) || cleanTarget.includes(cleanKey)) {
+          const num = parseFloat(val);
+          if (!isNaN(num)) return num;
+        }
+      }
+    }
+    return null;
+  };
+
+  // Helper to safely set calculated value in all matching target keys present in results
+  const setCalc = (targetKeys, calculatedValue) => {
+    if (calculatedValue === null || calculatedValue === undefined || isNaN(calculatedValue)) return;
+    const strVal = String(calculatedValue);
+
+    // If any target key already exists in resultsMap, update it
+    let matchedAny = false;
+    for (const tk of targetKeys) {
+      const cleanTarget = tk.toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (const existingKey of Object.keys(updated)) {
+        const cleanExisting = existingKey.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (cleanTarget === 'ldl' && cleanExisting.includes('vldl')) {
+          continue; // Guard against matching ldl inside vldl
+        }
+        if (cleanExisting === cleanTarget || 
+            cleanExisting === `test_${cleanTarget}` ||
+            cleanExisting.endsWith(`_${cleanTarget}`) ||
+            (cleanTarget.length > 4 && cleanExisting.includes(cleanTarget))) {
+          updated[existingKey] = strVal;
+          matchedAny = true;
+        }
+      }
+    }
+
+    // Always ensure the canonical short key is present
+    if (!matchedAny && targetKeys.length > 0) {
+      updated[targetKeys[0]] = strVal;
+    }
+  };
+
+  // A. LIPID PROFILE
+  const tc = getVal('totalCholesterol', 'cholesterol', 'total_cholesterol', 'test_lipid_total_cholesterol');
+  const tg = getVal('triglycerides', 'tg', 'test_lipid_triglycerides');
+  const hdl = getVal('hdl', 'hdlCholesterol', 'hdl_cholesterol', 'test_lipid_hdl_cholesterol');
+
+  if (tc !== null || tg !== null || hdl !== null) {
+    const lipid = calculateLipidPanel({ totalCholesterol: tc, hdl, triglycerides: tg });
+    if (lipid.vldl !== null) {
+      setCalc(['vldl', 'vldlCholesterol', 'test_lipid_vldl_cholesterol'], lipid.vldl);
+    }
+    if (lipid.ldl !== null) {
+      setCalc(['ldl', 'ldlCholesterol', 'test_lipid_ldl_cholesterol'], lipid.ldl);
+    }
+    if (lipid.nonHdl !== null) {
+      setCalc(['nonHdl', 'non_hdl', 'test_lipid_non_hdl_cholesterol'], lipid.nonHdl);
+    }
+    if (lipid.cholHdlRatio !== null) {
+      setCalc(['cholHdlRatio', 'chol_hdl_ratio', 'test_lipid_total_cholesterol___hdl_ratio'], lipid.cholHdlRatio);
+    }
+    if (lipid.warning) {
+      warnings.push(lipid.warning);
+    }
+  }
+
+  // B. LIVER FUNCTION TEST (LFT)
+  const tb = getVal('totalBilirubin', 'total_bilirubin', 'bilirubin_total', 'test_lft_total_bilirubin');
+  const db = getVal('directBilirubin', 'direct_bilirubin', 'bilirubin_direct', 'test_lft_direct_bilirubin');
+  const tp = getVal('totalProtein', 'total_protein', 'protein_total', 'test_lft_total_protein');
+  const alb = getVal('albumin', 'test_lft_albumin');
+
+  if (tb !== null || db !== null || tp !== null || alb !== null) {
+    const lft = calculateLFT({ totalBilirubin: tb, directBilirubin: db, totalProtein: tp, albumin: alb });
+    if (lft.indirectBilirubin !== null) {
+      setCalc(['indirectBilirubin', 'indirect_bilirubin', 'test_lft_indirect_bilirubin'], lft.indirectBilirubin);
+    }
+    if (lft.globulin !== null) {
+      setCalc(['globulin', 'test_lft_globulin'], lft.globulin);
+    }
+    if (lft.agRatio !== null) {
+      setCalc(['agRatio', 'ag_ratio', 'test_lft_a_g_ratio', 'test_lft_albumin___globulin_ratio'], lft.agRatio);
+    }
+  }
+
+  // C. COMPLETE BLOOD COUNT (CBC) & INDICES
+  const hb = getVal('hemoglobin', 'hb', 'hgb', 'test_cbc_hemoglobin');
+  const rbc = getVal('rbc', 'rbcCount', 'r_b_c_count', 'test_cbc_r_b_c_count', 'test_cbc_rbc');
+  const pcv = getVal('pcv', 'hct', 'hematocrit', 'test_cbc_hct', 'test_cbc_pcv');
+  const wbc = getVal('wbc', 'totalWbc', 'total_wbc', 'test_cbc_total_wbc_count', 'test_cbc_wbc');
+  const neut = getVal('neutrophils', 'neutrophil', 'neutrophil_pct', 'test_cbc_neutrophils');
+  const lymph = getVal('lymphocytes', 'lymphocyte', 'lymphocyte_pct', 'test_cbc_lymphocytes');
+
+  if (hb !== null || rbc !== null || pcv !== null || wbc !== null) {
+    const cbc = calculateCBC({
+      hemoglobin: hb,
+      rbc,
+      pcv,
+      wbc,
+      neutrophilPct: neut,
+      lymphocytePct: lymph
+    });
+
+    if (cbc.mcv !== null) setCalc(['mcv', 'test_cbc_mcv'], cbc.mcv);
+    if (cbc.mch !== null) setCalc(['mch', 'test_cbc_mch'], cbc.mch);
+    if (cbc.mchc !== null) setCalc(['mchc', 'test_cbc_mchc'], cbc.mchc);
+    if (cbc.anc !== null) setCalc(['anc', 'test_cbc_absolute_neutrophils_count', 'absolute_neutrophils_count'], cbc.anc);
+    if (cbc.alc !== null) setCalc(['alc', 'test_cbc_absolute_lymphocytes_count', 'absolute_lymphocytes_count'], cbc.alc);
+  }
+
+  // D. RENAL FUNCTION TEST (RFT / KFT)
+  const na = getVal('sodium', 'na', 'serum_sodium');
+  const cl = getVal('chloride', 'cl', 'serum_chloride');
+  const hco3 = getVal('bicarbonate', 'hco3', 'bicarbonate_hco3');
+  const cr = getVal('creatinine', 'serum_creatinine', 'test_kft_serum_creatinine', 'test_kft_creatinine');
+
+  if (na !== null || cl !== null || hco3 !== null || cr !== null) {
+    const rft = calculateRFT({
+      sodium: na,
+      chloride: cl,
+      bicarbonate: hco3,
+      creatinine: cr,
+      age: patientMeta.age || 30,
+      gender: patientMeta.gender || 'Male'
+    });
+
+    if (rft.anionGap !== null) setCalc(['anionGap', 'anion_gap'], rft.anionGap);
+    if (rft.egfr !== null) setCalc(['egfr', 'test_kft_egfr'], rft.egfr);
+  }
+
+  return { updated, warnings };
+}

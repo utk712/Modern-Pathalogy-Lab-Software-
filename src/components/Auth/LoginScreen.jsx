@@ -1,10 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Building2, ShieldAlert, Lock, User, Eye, EyeOff, LogIn, ArrowRight, Key, Sparkles, HelpCircle } from 'lucide-react';
-import { VendorMasterSetupModal } from './VendorMasterSetupModal';
 import { useLab } from '../../context/LabContext';
 
 export const LoginScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboarding }) => {
-  const { updateMasterConfig } = useLab();
   const [username, setUsername] = useState(() => labProfile?.adminUsername || 'admin');
   const [password, setPassword] = useState(() => labProfile?.adminPassword || 'admin123');
   const [securityKey, setSecurityKey] = useState(() => {
@@ -17,31 +15,6 @@ export const LoginScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboarding
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  
-  // Vendor Master Modal state
-  const [showVendorModal, setShowVendorModal] = useState(false);
-
-  // Keyboard shortcut Ctrl + Shift + V for Technician Master Setup
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
-        e.preventDefault();
-        setShowVendorModal(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  const handleConfigApplied = (config) => {
-    if (config.username) setUsername(config.username);
-    if (config.password) setPassword(config.password);
-    if (config.securityKey) setSecurityKey(config.securityKey);
-    if (updateMasterConfig) {
-      updateMasterConfig(config);
-    }
-    setShowVendorModal(false);
-  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -81,18 +54,6 @@ export const LoginScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboarding
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-sky-950 to-indigo-950 flex flex-col justify-center items-center p-4 font-sans select-none relative">
       
-      {/* Top Right: Master Vendor Technician Trigger Button */}
-      <div className="absolute top-4 right-4">
-        <button
-          onClick={() => setShowVendorModal(true)}
-          className="px-3 py-1.5 bg-slate-800/80 hover:bg-slate-800 border border-slate-700 text-amber-300 rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-md backdrop-blur-sm transition-all cursor-pointer"
-          title="Master Vendor Setup (Ctrl + Shift + V)"
-        >
-          <Lock className="h-3.5 w-3.5" />
-          <span>👑 Vendor Master Setup</span>
-        </button>
-      </div>
-
       <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-sky-100 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         
         {/* Top Header */}
@@ -205,20 +166,13 @@ export const LoginScreen = ({ labProfile, licenseInfo, onLogin, onOpenOnboarding
           {/* Quick Help Footer */}
           <div className="pt-2 border-t border-slate-100 text-center">
             <p className="text-[11px] text-slate-500">
-              Need installation or key setup? Press <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Ctrl + Shift + V</kbd> for Technician Master Setup.
+              Diagnostic LIMS Enterprise Edition • Authorized Laboratory Personnel Only
             </p>
           </div>
 
         </div>
 
       </div>
-
-      {/* Vendor Master Setup Modal */}
-      <VendorMasterSetupModal
-        isOpen={showVendorModal}
-        onClose={() => setShowVendorModal(false)}
-        onConfigApplied={handleConfigApplied}
-      />
 
     </div>
   );

@@ -11,6 +11,10 @@ const { runInteropTests } = require('./06_astm_hl7_interop.test.js');
 const { runDatabaseBackupTests } = require('./08_database_integrity_backup.test.js');
 const { runLicenseSecurityTests } = require('./09_license_security.test.js');
 const { runPerformanceTests } = require('./10_performance_benchmark.test.js');
+const { runPhase1Phase2Verification } = require('./22_phase1_phase2_verification.test.js');
+const { runClinicalComplianceTests } = require('./23_clinical_compliance.test.js');
+const { runHardwareReportDeliveryTests } = require('./24_hardware_report_delivery.test.js');
+const { runPhase5AutomationTests } = require('./25_phase5_automation.test.js');
 
 async function main() {
   console.log('========================================================================');
@@ -30,13 +34,25 @@ async function main() {
     allResults.push(...runInteropTests());
 
     console.log('▶ Running Database Integrity & Full Backup/Restore Cycle Tests...');
-    allResults.push(...runDatabaseBackupTests());
+    allResults.push(...await runDatabaseBackupTests());
 
     console.log('▶ Running Cryptographic Licensing & Lockout Tests...');
     allResults.push(...await runLicenseSecurityTests());
 
     console.log('▶ Running Performance & Scalability Benchmarking Tests...');
     allResults.push(...runPerformanceTests());
+
+    console.log('▶ Running Phase 1 & 2 Comprehensive Verification Tests...');
+    allResults.push(...await runPhase1Phase2Verification());
+
+    console.log('▶ Running Phase 3 Clinical & NABL Compliance Tests...');
+    allResults.push(...await runClinicalComplianceTests());
+
+    console.log('▶ Running Phase 4 Hardware & Report Delivery Tests...');
+    allResults.push(...await runHardwareReportDeliveryTests());
+
+    console.log('▶ Running Phase 5 Advanced Automation & Packaging Tests...');
+    allResults.push(...await runPhase5AutomationTests());
 
   } catch (err) {
     console.error('CRITICAL TEST RUNNER EXCEPTION:', err);
