@@ -15,6 +15,7 @@
   "build": {
     "appId": "com.diagnostic.lims",
     "productName": "Modern Diagnostic LIMS",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },
